@@ -1,7 +1,7 @@
 {
   "domain": "budget_manager",
   "name": "Budget Manager",
-  "version": "0.4.1",
+  "version": "0.5.1",
   "config_flow": true,
   "single_config_entry": true,
   "documentation": "https://github.com/bitosome/budget-manager#readme",

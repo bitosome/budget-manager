@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 from homeassistant.components import frontend, panel_custom
@@ -21,6 +22,8 @@ from .const import (
 async def async_register_panel(hass: HomeAssistant) -> None:
     """Register frontend assets and the full-screen custom panel."""
     frontend_path = Path(__file__).parent / "frontend"
+    panel_path = frontend_path / "budget-manager-panel.js"
+    panel_version = sha256(panel_path.read_bytes()).hexdigest()[:12]
     await hass.http.async_register_static_paths(
         [StaticPathConfig(STATIC_URL, str(frontend_path), False)]
     )
@@ -30,7 +33,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         hass,
         webcomponent_name=PANEL_COMPONENT,
         frontend_url_path=PANEL_URL,
-        module_url=f"{STATIC_URL}/budget-manager-panel.js",
+        module_url=f"{STATIC_URL}/budget-manager-panel.js?v={panel_version}",
         sidebar_title=PANEL_TITLE,
         sidebar_icon=PANEL_ICON,
         require_admin=False,

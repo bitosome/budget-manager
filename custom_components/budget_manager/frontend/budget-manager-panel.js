@@ -17,6 +17,7 @@ class BudgetManagerPanel extends HTMLElement {
     this._currentMonthRequested = false;
     this._hasConnected = false;
     this._listeningForNavigation = false;
+    this._stickyFirstColumn = this._loadStickyFirstColumnPreference();
     this._handleLocationChanged = () => {
       if (this._isBudgetRoute()) this._showCurrentMonth();
     };
@@ -58,6 +59,26 @@ class BudgetManagerPanel extends HTMLElement {
   _isBudgetRoute() {
     return window.location.pathname === "/budget-manager"
       || window.location.pathname.startsWith("/budget-manager/");
+  }
+
+  _loadStickyFirstColumnPreference() {
+    try {
+      const stored = window.localStorage.getItem("budget-manager-sticky-first-column");
+      if (stored !== null) return stored === "true";
+    } catch (_err) {
+      // Storage can be unavailable in restricted browser contexts.
+    }
+    return !window.matchMedia?.("(max-width: 700px)").matches;
+  }
+
+  _toggleStickyFirstColumn() {
+    this._stickyFirstColumn = !this._stickyFirstColumn;
+    try {
+      window.localStorage.setItem("budget-manager-sticky-first-column", String(this._stickyFirstColumn));
+    } catch (_err) {
+      // Keep the preference for this session when storage is unavailable.
+    }
+    this._render();
   }
 
   _showCurrentMonth() {
@@ -174,13 +195,13 @@ class BudgetManagerPanel extends HTMLElement {
       return `<header><div class="brand"><span class="logo">€</span><div><h1>Budget Manager</h1><p>Local Home Assistant budget</p></div></div></header>`;
     }
     return `
-      <header>
+      <header class="${this._month ? "month-header" : "plan-header"}">
         <div class="brand">
           <span class="logo">€</span>
           <div><h1>Budget Manager</h1><p>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</p></div>
         </div>
         <div class="header-actions">
-          ${this._month ? `<button class="quiet" data-action="back-year">← Plan view</button>` : ""}
+          ${this._month ? `<button class="quiet" data-action="back-year">← Plan</button>` : ""}
           ${this._canEdit ? `<button class="quiet" data-action="settings">Settings</button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
           <button class="quiet" data-action="refresh" title="Refresh">↻</button>
@@ -197,10 +218,11 @@ class BudgetManagerPanel extends HTMLElement {
           <button class="year-button" data-action="choose-year">${this._year}–${this._year + 1}</button>
           <button class="icon-button" data-action="next-year">›</button>
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions">
-          <button class="quiet" data-action="create-month">＋ Month</button>
-          <button class="primary" data-action="create-year">Copy / create year</button>
-        </div>` : ""}
+        <div class="toolbar-actions">
+          <button class="quiet" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}">${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}</button>
+          ${this._canEdit ? `<button class="quiet" data-action="create-month">＋ Month</button>
+          <button class="primary" data-action="create-year">Copy / create year</button>` : ""}
+        </div>
       </section>
 
       ${!(this._state.available_months || []).length ? `<section class="empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings">Open settings</button>` : ""}</section>` : ""}
@@ -266,7 +288,7 @@ class BudgetManagerPanel extends HTMLElement {
       </tr>`).join("")}`;
     };
     return `
-      <section class="matrix-section">
+      <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
         <div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div></div>
         <div class="matrix-wrap">
           <table class="matrix">
@@ -385,6 +407,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "prev-year") return this._load(this._year - 1);
     if (action === "next-year") return this._load(this._year + 1);
     if (action === "choose-year") return this._openYearPicker();
+    if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
     if (action === "settings") return this._openSettings();
     if (action === "open-month") { this._month = button.dataset.month; return this._render(); }
     if (action === "create-month") return this._openCreateMonth();
@@ -650,9 +673,9 @@ class BudgetManagerPanel extends HTMLElement {
 
   _styles() {
     return `
-      :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --red: #a64a42; --amber: #a36d00; display:block; min-height:100%; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
+      :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --red: #a64a42; --amber: #a36d00; display:block; min-height:100%; overflow-x:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
       * { box-sizing:border-box; } button, input, select, textarea { font:inherit; } button { color:inherit; }
-      .app { min-height:100vh; } .app.is-loading { cursor:progress; }
+      .app { min-height:100vh; overflow-x:hidden; } .app.is-loading { cursor:progress; }
       header { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:18px clamp(18px,4vw,54px); background:color-mix(in srgb, var(--surface) 94%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(16px); }
       .brand { display:flex; align-items:center; gap:13px; }.logo { width:43px; height:43px; display:grid; place-items:center; border-radius:13px; background:var(--green); color:white; font-size:24px; font-weight:700; box-shadow:0 8px 18px rgba(52,120,90,.24); }
       h1,h2,p { margin:0; } h1 { font-size:20px; line-height:1.1; } .brand p, .section-title p, .updated { color:var(--muted); font-size:12px; margin-top:4px; }
@@ -663,16 +686,16 @@ class BudgetManagerPanel extends HTMLElement {
       .empty-plan { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:22px; padding:20px; border:1px dashed color-mix(in srgb,var(--green) 45%,var(--line)); border-radius:15px; background:var(--surface); }.empty-plan h2 { margin:5px 0; font-size:18px; }.empty-plan p { color:var(--muted); font-size:12px; }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:210px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.month-remaining { display:block; margin:17px 0; font-size:24px; }.negative { color:var(--red); }.month-card dl { margin:0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.item-count { display:block; margin-top:13px; padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }.rag-status { display:inline-block; margin-top:9px; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; min-width:1980px; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { position:sticky; left:0; z-index:3; text-align:left; background:var(--surface); }.matrix thead th:first-child { z-index:4; }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; min-width:1980px; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }
       .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { width:35px; height:35px; border-radius:50%; background:var(--line); font-size:24px; }.modal-body { padding:20px; overflow:auto; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
       .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }
-      #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; transform:translateY(130%); transition:.2s ease; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { transform:translateY(0); }
+      #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
       @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; } }
-      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.header-actions .quiet:not(:last-child) { display:none; } }
+      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header [data-action="settings"],.header-actions [data-action="refresh"] { display:none; } }
     `;
   }
 }
