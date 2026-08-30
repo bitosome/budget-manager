@@ -1,0 +1,54 @@
+"""Constants for the Budget Manager integration."""
+
+from __future__ import annotations
+
+DOMAIN = "budget_manager"
+NAME = "Budget Manager"
+
+PLATFORMS = ["sensor", "number", "calendar"]
+
+STORAGE_VERSION = 1
+STORAGE_KEY_PREFIX = f"{DOMAIN}.data"
+
+PANEL_URL = "budget-manager"
+PANEL_TITLE = "Budget"
+PANEL_ICON = "mdi:wallet"
+PANEL_COMPONENT = "budget-manager-panel"
+STATIC_URL = f"/{DOMAIN}_frontend"
+
+SIGNAL_UPDATED = f"{DOMAIN}_updated"
+
+DEFAULT_CURRENCY = "EUR"
+DEFAULT_LOCALE = "en-GB"
+DEFAULT_DAILY_GREEN_THRESHOLD = 45.0
+DEFAULT_DAILY_YELLOW_THRESHOLD = 40.0
+DEFAULT_SAVINGS_TARGET_THRESHOLD = 45.0
+DEFAULT_SAVINGS_FLOOR_THRESHOLD = 40.0
+
+EXPORT_FORMAT = "budget-manager"
+EXPORT_VERSION = 1
+
+STATUS_PENDING = "pending"
+STATUS_PAID = "paid"
+STATUS_RECEIVED = "received"
+STATUS_SKIPPED = "skipped"
+VALID_STATUSES = {
+    STATUS_PENDING,
+    STATUS_PAID,
+    STATUS_RECEIVED,
+    STATUS_SKIPPED,
+}
+
+KIND_INCOME = "income"
+KIND_EXPENSE = "expense"
+KIND_SAVINGS = "savings"
+VALID_KINDS = {KIND_INCOME, KIND_EXPENSE, KIND_SAVINGS}
+
+RECURRENCE_SINGLE = "single"
+RECURRENCE_MONTHLY = "monthly"
+RECURRENCE_YEARLY = "yearly"
+VALID_RECURRENCES = {
+    RECURRENCE_SINGLE,
+    RECURRENCE_MONTHLY,
+    RECURRENCE_YEARLY,
+}

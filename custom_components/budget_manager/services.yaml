@@ -1,0 +1,90 @@
+set_balance:
+  name: Set account balance
+  description: Manually set the account balance for a budget month.
+  fields:
+    month:
+      name: Month
+      required: true
+      example: "2026-09"
+      selector:
+        text:
+    balance:
+      name: Balance
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1000000000
+          step: 0.01
+          mode: box
+
+mark_item:
+  name: Mark budget item
+  description: Mark one income or expense occurrence as pending, paid, received, or skipped.
+  fields:
+    month:
+      name: Month
+      required: true
+      example: "2026-09"
+      selector:
+        text:
+    item_id:
+      name: Item ID
+      required: true
+      selector:
+        text:
+    status:
+      name: Status
+      required: true
+      selector:
+        select:
+          options:
+            - pending
+            - paid
+            - received
+            - skipped
+
+copy_month:
+  name: Create or copy month
+  description: Create a blank month or copy a specific source month.
+  fields:
+    target_month:
+      name: Target month
+      required: true
+      example: "2028-01"
+      selector:
+        text:
+    source_month:
+      name: Source month
+      selector:
+        text:
+    overwrite:
+      name: Overwrite
+      default: false
+      selector:
+        boolean:
+
+copy_year:
+  name: Create or copy year
+  description: Create 12 blank months or copy a specific complete year.
+  fields:
+    target_year:
+      name: Target year
+      required: true
+      selector:
+        number:
+          min: 2000
+          max: 2200
+          mode: box
+    source_year:
+      name: Source year
+      selector:
+        number:
+          min: 2000
+          max: 2200
+          mode: box
+    overwrite:
+      name: Overwrite
+      default: false
+      selector:
+        boolean:

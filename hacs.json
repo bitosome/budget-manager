@@ -1,0 +1,7 @@
+{
+  "name": "Budget Manager",
+  "render_readme": true,
+  "content_in_root": false,
+  "homeassistant": "2026.1.0",
+  "files": ["custom_components/budget_manager/**"]
+}

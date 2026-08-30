@@ -1,0 +1,13 @@
+{
+  "domain": "budget_manager",
+  "name": "Budget Manager",
+  "version": "0.4.0",
+  "config_flow": true,
+  "single_config_entry": true,
+  "documentation": "https://github.com/bitosome/budget-manager#readme",
+  "issue_tracker": "https://github.com/bitosome/budget-manager/issues",
+  "codeowners": [],
+  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
+  "integration_type": "service",
+  "iot_class": "calculated"
+}

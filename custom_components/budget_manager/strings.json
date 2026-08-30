@@ -1,0 +1,47 @@
+{
+  "title": "Budget Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Budget Manager",
+        "description": "Creates an empty local budget. No setup values are required."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Budget Manager instance can be configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Daily money and automatic savings",
+        "description": "Set the RAG color limits and, separately, the acceptable daily-money range used to adjust automatic savings.",
+        "data": {
+          "daily_green_threshold": "Green from (EUR/day)",
+          "daily_yellow_threshold": "Yellow from (EUR/day)",
+          "savings_target_threshold": "Savings target (EUR/day)",
+          "savings_floor_threshold": "Savings floor (EUR/day)"
+        }
+      }
+    },
+    "error": {
+      "yellow_above_green": "The yellow threshold cannot exceed the green threshold.",
+      "savings_floor_above_target": "The savings floor cannot exceed the savings target."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "daily_allowance": {"name": "Daily allowance"},
+      "remaining": {"name": "Forecast remaining"},
+      "unpaid_expenses": {"name": "Unpaid expenses"},
+      "expected_income": {"name": "Expected income"},
+      "planned_savings": {"name": "Planned savings"}
+    },
+    "number": {
+      "account_balance": {"name": "Account balance"}
+    },
+    "calendar": {
+      "payments": {"name": "Budget payments"}
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "title": "Budget Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Настроить Budget Manager",
+        "description": "Создаёт пустой локальный бюджет без дополнительных параметров настройки."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Можно настроить только один экземпляр Budget Manager."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Дневной бюджет и автонакопления",
+        "description": "Настройте цветовые пороги RAG и отдельно допустимый диапазон дневного бюджета для автоматической корректировки накоплений.",
+        "data": {
+          "daily_green_threshold": "Зелёный от (EUR/день)",
+          "daily_yellow_threshold": "Жёлтый от (EUR/день)",
+          "savings_target_threshold": "Цель накоплений (EUR/день)",
+          "savings_floor_threshold": "Минимум при накоплениях (EUR/день)"
+        }
+      }
+    },
+    "error": {
+      "yellow_above_green": "Жёлтый порог не может быть выше зелёного.",
+      "savings_floor_above_target": "Минимум при накоплениях не может быть выше цели."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "daily_allowance": {"name": "Бюджет в день"},
+      "remaining": {"name": "Прогноз остатка"},
+      "unpaid_expenses": {"name": "Неоплаченные расходы"},
+      "expected_income": {"name": "Ожидаемый доход"},
+      "planned_savings": {"name": "План накоплений"}
+    },
+    "number": {
+      "account_balance": {"name": "На счету"}
+    },
+    "calendar": {
+      "payments": {"name": "Платежи бюджета"}
+    }
+  }
+}
