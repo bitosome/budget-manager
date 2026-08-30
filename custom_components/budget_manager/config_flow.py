@@ -12,6 +12,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    DEFAULT_CYCLE_END_DAY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
     DEFAULT_DAILY_YELLOW_THRESHOLD,
     DEFAULT_SAVINGS_FLOOR_THRESHOLD,
@@ -20,6 +21,7 @@ from .const import (
     NAME,
 )
 
+CONF_CYCLE_END_DAY = "cycle_end_day"
 CONF_GREEN = "daily_green_threshold"
 CONF_YELLOW = "daily_yellow_threshold"
 CONF_SAVINGS_TARGET = "savings_target_threshold"
@@ -34,7 +36,7 @@ class BudgetManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> "BudgetOptionsFlow":
-        """Return the daily-money and automatic-savings options flow."""
+        """Return the budget calculation options flow."""
         return BudgetOptionsFlow()
 
     async def async_step_user(
@@ -45,12 +47,12 @@ class BudgetManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class BudgetOptionsFlow(OptionsFlow):
-    """Manage daily-money and automatic-savings thresholds."""
+    """Manage cycle and calculation settings."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Show and save threshold options."""
+        """Show and save budget calculation options."""
         manager = self.hass.data.get(DOMAIN, {}).get("entries", {}).get(
             self.config_entry.entry_id
         )
@@ -72,6 +74,12 @@ class BudgetOptionsFlow(OptionsFlow):
 
         schema = vol.Schema(
             {
+                vol.Required(
+                    CONF_CYCLE_END_DAY,
+                    default=current.get(
+                        CONF_CYCLE_END_DAY, DEFAULT_CYCLE_END_DAY
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
                 vol.Required(
                     CONF_GREEN,
                     default=current.get(

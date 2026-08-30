@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .const import (
+    DEFAULT_CYCLE_END_DAY,
     DEFAULT_CURRENCY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
     DEFAULT_DAILY_YELLOW_THRESHOLD,
@@ -75,6 +76,20 @@ def clamp_day(year: int, month: int, day: int) -> int:
     return min(max(1, int(day)), monthrange(year, month)[1])
 
 
+def normalize_cycle_end_day(value: Any = DEFAULT_CYCLE_END_DAY) -> int:
+    """Validate the day in the following month that ends a budget cycle."""
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as err:
+        raise BudgetValidationError("Cycle end day must be a number") from err
+    if not number.is_finite() or number != number.to_integral_value():
+        raise BudgetValidationError("Cycle end day must be a whole number")
+    cycle_end_day = int(number)
+    if not 1 <= cycle_end_day <= 31:
+        raise BudgetValidationError("Cycle end day must be between 1 and 31")
+    return cycle_end_day
+
+
 def due_date(month_key: str, due_day: int | None) -> date:
     """Return an item's concrete due date within a budget month."""
     year, month = month_parts(month_key)
@@ -82,10 +97,14 @@ def due_date(month_key: str, due_day: int | None) -> date:
     return date(year, month, day)
 
 
-def default_payday(month_key: str) -> str:
-    """Return the last day of a month as an ISO date."""
+def default_payday(
+    month_key: str, cycle_end_day: int = DEFAULT_CYCLE_END_DAY
+) -> str:
+    """Return the configured cycle end in the month after a budget month."""
     year, month = month_parts(month_key)
-    return date(year, month, monthrange(year, month)[1]).isoformat()
+    next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+    day = clamp_day(next_year, next_month, normalize_cycle_end_day(cycle_end_day))
+    return date(next_year, next_month, day).isoformat()
 
 
 def shift_period_date(source_month: str, target_month: str, value: str | None) -> str:
@@ -112,11 +131,12 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
             "configured": True,
+            "cycle_end_day": DEFAULT_CYCLE_END_DAY,
             "daily_green_threshold": DEFAULT_DAILY_GREEN_THRESHOLD,
             "daily_yellow_threshold": DEFAULT_DAILY_YELLOW_THRESHOLD,
             "savings_target_threshold": DEFAULT_SAVINGS_TARGET_THRESHOLD,
@@ -126,14 +146,19 @@ def empty_data() -> dict[str, Any]:
     }
 
 
-def make_month(month_key: str, *, source: str | None = None) -> dict[str, Any]:
+def make_month(
+    month_key: str,
+    *,
+    source: str | None = None,
+    cycle_end_day: int = DEFAULT_CYCLE_END_DAY,
+) -> dict[str, Any]:
     """Create a blank budget month."""
     validate_month_key(month_key)
     return {
         "month": month_key,
         "account_balance": 0.0,
         "balance_updated_at": None,
-        "payday": default_payday(month_key),
+        "payday": default_payday(month_key, cycle_end_day),
         "created_from": source,
         "items": [],
     }
@@ -224,13 +249,13 @@ def copy_month_data(
     target_key: str,
     *,
     series_map: dict[str, str] | None = None,
+    cycle_end_day: int = DEFAULT_CYCLE_END_DAY,
 ) -> dict[str, Any]:
     """Copy a month as a clean future plan."""
     validate_month_key(source_key)
     validate_month_key(target_key)
-    target = make_month(target_key, source=source_key)
-    target["payday"] = shift_period_date(
-        source_key, target_key, source_month.get("payday")
+    target = make_month(
+        target_key, source=source_key, cycle_end_day=cycle_end_day
     )
     target["items"] = []
     for raw in source_month.get("items", []):
@@ -330,6 +355,9 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
     portable_settings = {
         "currency": str(settings.get("currency", defaults["currency"])),
         "locale": str(settings.get("locale", defaults["locale"])),
+        "cycle_end_day": normalize_cycle_end_day(
+            settings.get("cycle_end_day", defaults["cycle_end_day"])
+        ),
         "daily_green_threshold": float(
             settings.get(
                 "daily_green_threshold", defaults["daily_green_threshold"]
@@ -387,6 +415,9 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
     defaults = empty_data()["settings"]
     green, yellow = normalize_thresholds(raw_settings)
     savings_target, savings_floor = normalize_savings_thresholds(raw_settings)
+    cycle_end_day = normalize_cycle_end_day(
+        raw_settings.get("cycle_end_day", defaults["cycle_end_day"])
+    )
     currency = str(raw_settings.get("currency", defaults["currency"])).strip()
     locale = str(raw_settings.get("locale", defaults["locale"])).strip()
     if not currency or not locale:
@@ -403,6 +434,7 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
             "currency": currency,
             "locale": locale,
             "configured": True,
+            "cycle_end_day": cycle_end_day,
             "daily_green_threshold": green,
             "daily_yellow_threshold": yellow,
             "savings_target_threshold": savings_target,
@@ -419,7 +451,7 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
             raise BudgetValidationError(
                 f"Month key {month_key} does not match {embedded_key}"
             )
-        month = make_month(month_key)
+        month = make_month(month_key, cycle_end_day=cycle_end_day)
         month["account_balance"] = money(raw_month.get("account_balance", 0))
         balance_updated_at = raw_month.get("balance_updated_at")
         if balance_updated_at is not None:
@@ -430,13 +462,6 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
                     f"Month {month_key} has an invalid balance timestamp"
                 ) from err
             month["balance_updated_at"] = str(balance_updated_at)
-        payday = raw_month.get("payday") or default_payday(month_key)
-        try:
-            month["payday"] = date.fromisoformat(str(payday)).isoformat()
-        except ValueError as err:
-            raise BudgetValidationError(
-                f"Month {month_key} has an invalid cycle end"
-            ) from err
         raw_items = raw_month.get("items", [])
         if not isinstance(raw_items, list):
             raise BudgetValidationError(f"Month {month_key} items must be a list")
@@ -500,7 +525,10 @@ def calculate_month(
     try:
         payday = date.fromisoformat(month.get("payday") or default_payday(month_key))
     except ValueError:
-        payday = date(year, month_number, monthrange(year, month_number)[1])
+        cycle_end_day = normalize_cycle_end_day(
+            (settings or {}).get("cycle_end_day", DEFAULT_CYCLE_END_DAY)
+        )
+        payday = date.fromisoformat(default_payday(month_key, cycle_end_day))
     days_in_month = monthrange(year, month_number)[1]
     days_until_payday = max(1, (payday - today).days + 1)
     divisor = min(days_in_month, days_until_payday)

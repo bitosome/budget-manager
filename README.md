@@ -20,6 +20,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Create a blank month or copy any specific month.
 - Create a blank 12-month year or copy any specific year.
 - Renewal/special-month highlighting.
+- Configurable budget-cycle end day (the 2nd of the following month by default).
 - Independently configurable per-day RAG colors (green from €45/day and yellow from €40/day by default).
 - Fixed or automatic savings with its own target and floor (default €45–€40/day). The planned savings amount is preserved inside that range, then adjusted only enough to return to it.
 - Native Home Assistant summary sensors, account-balance number entity, calendar, and actions.
@@ -40,7 +41,7 @@ forecast remaining = manual account balance
 EUR/day = forecast remaining / relevant days
 ```
 
-The day divisor is the smaller of the number of days in the budget month and the inclusive number of days until that month's configured payday/cycle end.
+The day divisor is the smaller of the number of days in the budget month and the inclusive number of days until its cycle end. By default, a budget month runs through the 2nd of the following calendar month; this day is configurable in Settings.
 
 Marking an item paid or received only changes its status. It does not change the account balance, which remains a deliberate manual input.
 
@@ -80,7 +81,7 @@ Add `https://github.com/bitosome/budget-manager` to HACS as an **Integration**, 
 
 Entity IDs may receive a numeric suffix when an entity with the same ID already exists.
 
-RAG colors and automatic-savings limits can be changed from the Budget panel or from **Settings → Devices & services → Budget Manager → Configure**. The active values are also shown directly in both month and plan views.
+The cycle-end day, RAG colors, and automatic-savings limits can be changed from the Budget panel or from **Settings → Devices & services → Budget Manager → Configure**. RAG status is communicated by the color of daily-money pills and cells rather than repeated threshold text in the month and plan views.
 
 ## Import and export
 
@@ -105,7 +106,7 @@ Copying a month or year:
 - Resets account balances.
 - Resets paid/received/skipped items to pending.
 - Assigns fresh occurrence IDs.
-- Shifts payday and recurrence-end dates relative to the target period.
+- Uses the global cycle-end setting and shifts recurrence-end dates relative to the target period.
 - Preserves series linkage inside a copied year without linking the copy to the source year's history.
 
 When creating a year without **Overwrite**, existing target months are preserved and only missing months are filled. This makes it safe to complete a partially planned year. Enabling **Overwrite** replaces all 12 target months.

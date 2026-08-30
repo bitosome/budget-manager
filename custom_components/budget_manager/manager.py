@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    DEFAULT_CYCLE_END_DAY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
     DEFAULT_DAILY_YELLOW_THRESHOLD,
     DEFAULT_SAVINGS_FLOOR_THRESHOLD,
@@ -31,6 +32,7 @@ from .model import (
     calculate_year,
     copy_month_data,
     current_month_key,
+    default_payday,
     empty_data,
     export_data_document,
     iter_recurrence_months,
@@ -38,6 +40,7 @@ from .model import (
     money,
     new_id,
     normalize_item,
+    normalize_cycle_end_day,
     normalize_import_document,
     normalize_savings_thresholds,
     normalize_thresholds,
@@ -71,10 +74,16 @@ class BudgetManager:
         settings = self._data.setdefault("settings", {})
         for key, value in defaults.items():
             settings.setdefault(key, value)
+        try:
+            cycle_end_day = normalize_cycle_end_day(settings["cycle_end_day"])
+        except BudgetValidationError:
+            cycle_end_day = DEFAULT_CYCLE_END_DAY
+        settings["cycle_end_day"] = cycle_end_day
         settings["configured"] = True
         self._data.setdefault("months", {})
-        for month in self._data["months"].values():
+        for month_key, month in self._data["months"].items():
             month.pop("note", None)
+            month["payday"] = default_payday(month_key, cycle_end_day)
             migrated_items = []
             for item in month.get("items", []):
                 if (
@@ -89,7 +98,7 @@ class BudgetManager:
                     item.setdefault("dynamic", False)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 3
+        self._data["schema_version"] = 4
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -162,7 +171,7 @@ class BudgetManager:
             await self._async_commit()
 
     async def async_update_settings(self, changes: dict[str, Any]) -> None:
-        """Update daily-money and automatic-savings settings."""
+        """Update cycle, daily-money, and automatic-savings settings."""
         settings = self._data.setdefault("settings", empty_data()["settings"])
         green = changes.get(
             "daily_green_threshold",
@@ -194,11 +203,20 @@ class BudgetManager:
                 "savings_floor_threshold": savings_floor,
             }
         )
+        cycle_end_day = normalize_cycle_end_day(
+            changes.get(
+                "cycle_end_day",
+                settings.get("cycle_end_day", DEFAULT_CYCLE_END_DAY),
+            )
+        )
         async with self._lock:
+            settings["cycle_end_day"] = cycle_end_day
             settings["daily_green_threshold"] = green
             settings["daily_yellow_threshold"] = yellow
             settings["savings_target_threshold"] = savings_target
             settings["savings_floor_threshold"] = savings_floor
+            for month_key, month in self._data["months"].items():
+                month["payday"] = default_payday(month_key, cycle_end_day)
             await self._async_commit()
 
     def current_month(self) -> dict[str, Any] | None:
@@ -220,13 +238,23 @@ class BudgetManager:
         async with self._lock:
             if target in self._data["months"] and not overwrite:
                 raise BudgetValidationError(f"Month {target} already exists")
+            cycle_end_day = normalize_cycle_end_day(
+                self._data["settings"].get(
+                    "cycle_end_day", DEFAULT_CYCLE_END_DAY
+                )
+            )
             if source:
                 source_month = self._data["months"].get(source)
                 if source_month is None:
                     raise BudgetValidationError(f"Source month {source} does not exist")
-                month = copy_month_data(source_month, source, target)
+                month = copy_month_data(
+                    source_month,
+                    source,
+                    target,
+                    cycle_end_day=cycle_end_day,
+                )
             else:
-                month = make_month(target)
+                month = make_month(target, cycle_end_day=cycle_end_day)
             self._data["months"][target] = month
             await self._async_commit()
             return self._month_payload(month)
@@ -245,6 +273,11 @@ class BudgetManager:
             raise BudgetValidationError("Source year is outside the supported range")
         targets = [f"{int(target_year):04d}-{month:02d}" for month in range(1, 13)]
         async with self._lock:
+            cycle_end_day = normalize_cycle_end_day(
+                self._data["settings"].get(
+                    "cycle_end_day", DEFAULT_CYCLE_END_DAY
+                )
+            )
             series_map: dict[str, str] = {}
             for month_number, target in enumerate(targets, start=1):
                 if target in self._data["months"] and not overwrite:
@@ -260,9 +293,14 @@ class BudgetManager:
                         source,
                         target,
                         series_map=series_map,
+                        cycle_end_day=cycle_end_day,
                     )
                 else:
-                    self._data["months"][target] = make_month(target, source=source)
+                    self._data["months"][target] = make_month(
+                        target,
+                        source=source,
+                        cycle_end_day=cycle_end_day,
+                    )
             await self._async_commit()
             return calculate_year(self._data, int(target_year))
 

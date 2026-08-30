@@ -14,9 +14,10 @@
   "options": {
     "step": {
       "init": {
-        "title": "Daily money and automatic savings",
-        "description": "Set the RAG color limits and, separately, the acceptable daily-money range used to adjust automatic savings.",
+        "title": "Budget calculation settings",
+        "description": "Set the monthly cycle end, RAG color limits, and the acceptable daily-money range used to adjust automatic savings.",
         "data": {
+          "cycle_end_day": "Cycle ends on this day of the following month",
           "daily_green_threshold": "Green from (EUR/day)",
           "daily_yellow_threshold": "Yellow from (EUR/day)",
           "savings_target_threshold": "Savings target (EUR/day)",

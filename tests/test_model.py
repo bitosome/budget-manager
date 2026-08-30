@@ -52,6 +52,18 @@ manager_module = importlib.import_module("custom_components.budget_manager.manag
 
 class BudgetModelTests(unittest.TestCase):
 
+    def test_default_cycle_ends_on_second_of_following_month(self) -> None:
+        self.assertEqual(model.default_payday("2026-09"), "2026-10-02")
+        self.assertEqual(model.default_payday("2026-12"), "2027-01-02")
+        self.assertEqual(model.default_payday("2027-01", 31), "2027-02-28")
+
+    def test_cycle_end_day_requires_whole_day_in_range(self) -> None:
+        for invalid in (0, 32, 2.5, "tomorrow"):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                model.BudgetValidationError
+            ):
+                model.normalize_cycle_end_day(invalid)
+
     def test_dynamic_savings_preserves_plan_inside_rag_band(self) -> None:
         month = model.make_month("2026-09")
         month["payday"] = "2026-09-30"
@@ -219,8 +231,9 @@ class BudgetModelTests(unittest.TestCase):
 
     def test_portable_export_round_trip(self) -> None:
         data = model.empty_data()
+        data["settings"]["cycle_end_day"] = 5
         data["settings"]["daily_green_threshold"] = 52
-        month = model.make_month("2026-09")
+        month = model.make_month("2026-09", cycle_end_day=5)
         month["account_balance"] = 1234.56
         month["items"] = [
             model.normalize_item(
@@ -240,6 +253,8 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(document["version"], 1)
         self.assertNotIn("configured", document["settings"])
         self.assertNotIn("created_from", document["months"]["2026-09"])
+        self.assertEqual(imported["settings"]["cycle_end_day"], 5)
+        self.assertEqual(imported["months"]["2026-09"]["payday"], "2026-10-05")
         self.assertEqual(imported["settings"]["daily_green_threshold"], 52)
         self.assertEqual(imported["months"]["2026-09"]["account_balance"], 1234.56)
         self.assertEqual(imported["months"]["2026-09"]["items"][0]["name"], "Water")
@@ -343,6 +358,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_update_stores_rag_and_savings_separately(self) -> None:
         await self.manager.async_update_settings(
             {
+                "cycle_end_day": 7,
                 "daily_green_threshold": 52,
                 "daily_yellow_threshold": 41,
                 "savings_target_threshold": 47,
@@ -350,10 +366,19 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         settings = self.manager.data["settings"]
+        self.assertEqual(settings["cycle_end_day"], 7)
+        self.assertEqual(
+            self.manager.data["months"]["2026-09"]["payday"], "2026-10-07"
+        )
         self.assertEqual(settings["daily_green_threshold"], 52)
         self.assertEqual(settings["daily_yellow_threshold"], 41)
         self.assertEqual(settings["savings_target_threshold"], 47)
         self.assertEqual(settings["savings_floor_threshold"], 36)
+
+    async def test_new_month_uses_global_cycle_end_day(self) -> None:
+        await self.manager.async_update_settings({"cycle_end_day": 12})
+        created = await self.manager.async_create_month("2026-10")
+        self.assertEqual(created["payday"], "2026-11-12")
 
     async def test_marking_dynamic_savings_paid_freezes_transfer(self) -> None:
         month = self.manager.data["months"]["2026-09"]
