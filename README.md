@@ -10,7 +10,8 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 
 - Full 12-month overview for any year.
 - Grouped 24-month planning matrix showing the selected year followed by the next year, with explicit year headers.
-- Per-device control to pin or unpin the plan table's first column; mobile defaults to unpinned for easier horizontal scrolling.
+- A visible toggle in the plan table's `Item` header pins or unpins the first column per device; mobile defaults to unpinned for easier horizontal scrolling.
+- Optional inline plan-table editing for amounts. New cells create one-time items with default properties and are highlighted as requiring review in the month view until their details are saved.
 - Detailed month view with expected income, expenditures, manual account balance, remaining forecast, and automatic EUR/day calculation.
 - The **Budget** sidebar always opens the current month (or the nearest available budget month).
 - Add, edit, and delete income, expenditures, and savings.

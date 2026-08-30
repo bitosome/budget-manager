@@ -18,6 +18,7 @@ class BudgetManagerPanel extends HTMLElement {
     this._hasConnected = false;
     this._listeningForNavigation = false;
     this._stickyFirstColumn = this._loadStickyFirstColumnPreference();
+    this._matrixEditMode = false;
     this._handleLocationChanged = () => {
       if (this._isBudgetRoute()) this._showCurrentMonth();
     };
@@ -218,11 +219,8 @@ class BudgetManagerPanel extends HTMLElement {
           <button class="year-button" data-action="choose-year">${this._year}–${this._year + 1}</button>
           <button class="icon-button" data-action="next-year">›</button>
         </div>
-        <div class="toolbar-actions">
-          <button class="quiet" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}">${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}</button>
-          ${this._canEdit ? `<button class="quiet" data-action="create-month">＋ Month</button>
-          <button class="primary" data-action="create-year">Copy / create year</button>` : ""}
-        </div>
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="quiet" data-action="create-month">＋ Month</button>
+          <button class="primary" data-action="create-year">Copy / create year</button></div>` : ""}
       </section>
 
       ${!(this._state.available_months || []).length ? `<section class="empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings">Open settings</button>` : ""}</section>` : ""}
@@ -266,7 +264,7 @@ class BudgetManagerPanel extends HTMLElement {
     for (const monthKey of months) {
       const month = this._state.months[monthKey];
       for (const item of month?.items || []) {
-        if (!this._itemHasMonthlyValue(item)) continue;
+        if (!this._itemHasMonthlyValue(item) && !this._matrixEditMode) continue;
         const key = `${item.kind}:${item.name}`;
         if (!rows.has(key)) rows.set(key, { name: item.name, kind: item.kind, months: {} });
         rows.get(key).months[monthKey] = item;
@@ -284,18 +282,18 @@ class BudgetManagerPanel extends HTMLElement {
       if (!groupRows.length) return "";
       return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="kind-dot"></span>${group.label}</th></tr>${groupRows.map((row) => `<tr class="${row.kind}">
         <th title="${this._esc(row.name)}"><span class="kind-dot"></span><span>${this._esc(row.name)}</span></th>
-        ${months.map((key) => this._matrixCell(row.months[key], key)).join("")}
+        ${months.map((key) => this._matrixCell(row, row.months[key], key)).join("")}
       </tr>`).join("")}`;
     };
     return `
       <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
-        <div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div></div>
+        <div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>${this._canEdit ? `<button class="quiet matrix-edit-toggle ${this._matrixEditMode ? "active" : ""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode ? "Done editing" : "Edit values"}</button>` : ""}</div>
         <div class="matrix-wrap">
           <table class="matrix">
             <colgroup><col class="item-column">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
               <tr class="matrix-years"><th>Year</th>${years.map((year) => `<th colspan="12">${year}</th>`).join("")}</tr>
-              <tr><th>Item</th>${months.map((key) => `<th>${MONTH_NAMES[Number(key.slice(5)) - 1].slice(0, 3)}</th>`).join("")}</tr>
+              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${MONTH_NAMES[Number(key.slice(5)) - 1].slice(0, 3)}</th>`).join("")}</tr>
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
@@ -319,7 +317,11 @@ class BudgetManagerPanel extends HTMLElement {
     }).join("")}</tr>`;
   }
 
-  _matrixCell(item, monthKey) {
+  _matrixCell(row, item, monthKey) {
+    if (this._matrixEditMode && this._canEdit) {
+      const value = item ? Number(item.amount).toFixed(2) : "";
+      return `<td class="matrix-edit-cell ${item?.needs_review ? "needs-review" : ""}"><input class="matrix-amount-input" type="number" min="0" step="0.01" inputmode="decimal" value="${value}" data-action="edit-matrix-value" data-month="${monthKey}" data-item-id="${item?.id || ""}" data-name="${this._esc(row.name)}" data-kind="${row.kind}" data-original="${value}" aria-label="${this._esc(row.name)}, ${this._monthLabel(monthKey)} amount"></td>`;
+    }
     if (!item) return `<td class="blank">—</td>`;
     const complete = item.status === "paid" || item.status === "received";
     const effective = Number(item.effective_amount ?? item.amount);
@@ -368,6 +370,7 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _itemHasMonthlyValue(item) {
+    if (item.needs_review) return true;
     if (item.kind === "savings" && item.dynamic) return true;
     return Number(item.effective_amount ?? item.amount ?? 0) > 0;
   }
@@ -377,10 +380,10 @@ class BudgetManagerPanel extends HTMLElement {
     const actionLabel = kind === "income" ? (complete ? "Received" : "Mark received") : (complete ? "Paid" : "Mark paid");
     const amount = item.effective_amount ?? item.amount;
     const adjusted = kind === "savings" && item.dynamic && Number(amount) !== Number(item.amount);
-    return `<article class="item ${complete ? "complete" : ""}">
+    return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(item.name)} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(item.name)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
@@ -394,8 +397,15 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _bindEvents() {
-    this.shadowRoot.querySelectorAll("[data-action]").forEach((node) => {
+    this.shadowRoot.querySelectorAll('[data-action]:not([data-action="edit-matrix-value"])').forEach((node) => {
       node.addEventListener("click", (event) => this._handleAction(event));
+    });
+    this.shadowRoot.querySelectorAll('[data-action="edit-matrix-value"]').forEach((input) => {
+      input.addEventListener("change", (event) => this._saveMatrixValue(event.currentTarget));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+        if (event.key === "Escape") { event.currentTarget.value = event.currentTarget.dataset.original; event.currentTarget.blur(); }
+      });
     });
   }
 
@@ -408,6 +418,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "next-year") return this._load(this._year + 1);
     if (action === "choose-year") return this._openYearPicker();
     if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
+    if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
     if (action === "settings") return this._openSettings();
     if (action === "open-month") { this._month = button.dataset.month; return this._render(); }
     if (action === "create-month") return this._openCreateMonth();
@@ -418,6 +429,77 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "edit-item") return this._openItemEditor(button.dataset.id);
     if (action === "toggle-status") return this._toggleStatus(button.dataset.id, button.dataset.kind);
     if (action === "delete-month") return this._deleteMonth();
+  }
+
+  async _saveMatrixValue(input) {
+    if (input.dataset.saving === "true") return;
+    const rawValue = input.value.trim();
+    const original = input.dataset.original;
+    if (!input.dataset.itemId && rawValue === "") return;
+    const amount = rawValue === "" ? 0 : Number(rawValue);
+    if (!Number.isFinite(amount) || amount < 0) {
+      input.value = original;
+      return this._showError(new Error("Amount must be a non-negative number."));
+    }
+    if ((original === "" && amount === 0) || (original !== "" && amount === Number(original))) return;
+
+    const monthKey = input.dataset.month;
+    const month = this._state.months[monthKey];
+    const existing = input.dataset.itemId
+      ? month?.items.find((item) => item.id === input.dataset.itemId)
+      : null;
+    const wrap = this.shadowRoot.querySelector(".matrix-wrap");
+    const scrollLeft = wrap?.scrollLeft || 0;
+    const scrollTop = wrap?.scrollTop || 0;
+    input.dataset.saving = "true";
+    input.disabled = true;
+    try {
+      if (!month) {
+        await this._hass.callWS({
+          type: "budget_manager/create_month",
+          target: monthKey,
+          source: null,
+          overwrite: false,
+        });
+      }
+      await this._hass.callWS({
+        type: "budget_manager/upsert_item",
+        month: monthKey,
+        scope: "this",
+        item: existing ? {
+          ...existing,
+          amount,
+          needs_review: true,
+        } : {
+          name: input.dataset.name,
+          kind: input.dataset.kind,
+          amount,
+          due_day: null,
+          status: "pending",
+          category: "",
+          special: false,
+          special_label: "",
+          notes: "",
+          sort_order: 0,
+          recurrence: "single",
+          recurrence_end: null,
+          dynamic: input.dataset.kind === "savings",
+          needs_review: true,
+        },
+      });
+      await this._load(this._year);
+      const updatedWrap = this.shadowRoot.querySelector(".matrix-wrap");
+      if (updatedWrap) {
+        updatedWrap.scrollLeft = scrollLeft;
+        updatedWrap.scrollTop = scrollTop;
+      }
+      this._showMessage("Value saved. Review its details in the month view.");
+    } catch (err) {
+      input.disabled = false;
+      input.dataset.saving = "false";
+      input.value = original;
+      this._showError(err);
+    }
   }
 
   _openSettings() {
@@ -502,7 +584,7 @@ class BudgetManagerPanel extends HTMLElement {
   _openModal(title, fields, submitLabel, onSubmit, extraButtons = "") {
     const root = this.shadowRoot.getElementById("modal-root");
     root.innerHTML = `<div class="modal-backdrop"><form class="modal" id="modal-form">
-      <div class="modal-head"><h2>${title}</h2><button type="button" class="close" id="modal-close">×</button></div>
+      <div class="modal-head"><h2>${title}</h2><button type="button" class="close" id="modal-close" aria-label="Close" title="Close"></button></div>
       <div class="modal-body">${fields}</div>
       <div class="modal-actions">${extraButtons}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="primary" type="submit">${submitLabel}</button></div>
     </form></div>`;
@@ -571,6 +653,7 @@ class BudgetManagerPanel extends HTMLElement {
     const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
     const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
     const fields = `
+      ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
       <div class="two-col">
         <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option><option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option></select></label>
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
@@ -604,6 +687,7 @@ class BudgetManagerPanel extends HTMLElement {
           category: form.get("category"), recurrence,
           recurrence_end: recurrence === "single" ? null : form.get("recurrence_end"),
           dynamic: form.has("dynamic"),
+          needs_review: false,
           special: form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
         },
       });
@@ -684,14 +768,16 @@ class BudgetManagerPanel extends HTMLElement {
       button { border:0; cursor:pointer; }.quiet,.primary,.danger-button { border-radius:10px; padding:10px 14px; font-weight:650; }.quiet { background:var(--surface); border:1px solid var(--line); }.quiet:hover { border-color:var(--green); }.primary { background:var(--green); color:#fff; box-shadow:0 5px 14px rgba(52,120,90,.2); }.danger-button { color:var(--red); background:transparent; border:1px solid color-mix(in srgb, var(--red) 35%, transparent); }
       .year-toolbar,.month-toolbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:22px; }.year-switcher { display:flex; align-items:center; gap:8px; }.icon-button,.year-button { height:46px; border-radius:12px; background:var(--surface); border:1px solid var(--line); }.icon-button { width:46px; font-size:26px; }.year-button { min-width:150px; padding:0 22px; font-size:20px; font-weight:750; }
       .empty-plan { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:22px; padding:20px; border:1px dashed color-mix(in srgb,var(--green) 45%,var(--line)); border-radius:15px; background:var(--surface); }.empty-plan h2 { margin:5px 0; font-size:18px; }.empty-plan p { color:var(--muted); font-size:12px; }
+      .matrix-edit-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:210px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.month-remaining { display:block; margin:17px 0; font-size:24px; }.negative { color:var(--red); }.month-card dl { margin:0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.item-count { display:block; margin-top:13px; padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }.rag-status { display:inline-block; margin-top:9px; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; min-width:1980px; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
-      .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; min-width:1980px; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }
-      .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { width:35px; height:35px; border-radius:50%; background:var(--line); font-size:24px; }.modal-body { padding:20px; overflow:auto; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
+      .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { padding:20px; overflow:auto; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
       .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }
+      .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
       @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; } }

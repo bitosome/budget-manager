@@ -226,6 +226,21 @@ class BudgetModelTests(unittest.TestCase):
                 }
             )
 
+    def test_review_flag_defaults_false_and_can_be_imported(self) -> None:
+        normal = model.normalize_item(
+            {"name": "Water", "kind": "expense", "amount": 50}
+        )
+        review = model.normalize_item(
+            {
+                "name": "Insurance",
+                "kind": "expense",
+                "amount": 100,
+                "needs_review": True,
+            }
+        )
+        self.assertFalse(normal["needs_review"])
+        self.assertTrue(review["needs_review"])
+
     def test_due_day_is_clamped(self) -> None:
         self.assertEqual(model.due_date("2027-02", 31), date(2027, 2, 28))
 
@@ -241,6 +256,7 @@ class BudgetModelTests(unittest.TestCase):
                     "name": "Water",
                     "kind": "expense",
                     "amount": 42.5,
+                    "needs_review": True,
                     "special": True,
                     "special_label": "Annual renewal",
                 }
@@ -258,6 +274,9 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(imported["settings"]["daily_green_threshold"], 52)
         self.assertEqual(imported["months"]["2026-09"]["account_balance"], 1234.56)
         self.assertEqual(imported["months"]["2026-09"]["items"][0]["name"], "Water")
+        self.assertTrue(
+            imported["months"]["2026-09"]["items"][0]["needs_review"]
+        )
 
     def test_import_rejects_non_budget_json(self) -> None:
         with self.assertRaisesRegex(model.BudgetValidationError, "Not a Budget"):
@@ -380,6 +399,24 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         created = await self.manager.async_create_month("2026-10")
         self.assertEqual(created["payday"], "2026-11-12")
 
+    async def test_item_review_flag_persists_until_full_edit_clears_it(self) -> None:
+        created = await self.manager.async_upsert_item(
+            "2026-09",
+            {
+                "name": "Water",
+                "kind": "expense",
+                "amount": 50,
+                "recurrence": "single",
+                "needs_review": True,
+            },
+        )
+        self.assertTrue(created["needs_review"])
+        updated = await self.manager.async_upsert_item(
+            "2026-09", {**created, "amount": 55, "needs_review": False}
+        )
+        self.assertFalse(updated["needs_review"])
+        self.assertEqual(updated["amount"], 55)
+
     async def test_marking_dynamic_savings_paid_freezes_transfer(self) -> None:
         month = self.manager.data["months"]["2026-09"]
         month["payday"] = "2026-09-30"
@@ -420,6 +457,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         migrated = manager.data["months"]["2026-09"]["items"][0]
         self.assertEqual(migrated["kind"], "savings")
         self.assertTrue(migrated["dynamic"])
+        self.assertFalse(migrated["needs_review"])
 
     async def test_existing_zero_value_expenses_are_preserved(self) -> None:
         manager = manager_module.BudgetManager(object(), "old-zero")

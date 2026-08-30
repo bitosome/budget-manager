@@ -131,7 +131,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -237,6 +237,7 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         else None,
         "recurrence": recurrence,
         "recurrence_end": recurrence_end,
+        "needs_review": bool(raw.get("needs_review", False)),
         "dynamic": bool(raw.get("dynamic", kind == KIND_SAVINGS))
         if kind == KIND_SAVINGS
         else False,

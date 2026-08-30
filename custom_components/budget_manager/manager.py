@@ -86,6 +86,7 @@ class BudgetManager:
             month["payday"] = default_payday(month_key, cycle_end_day)
             migrated_items = []
             for item in month.get("items", []):
+                item.setdefault("needs_review", False)
                 if (
                     item.get("kind") == "expense"
                     and item.get("name", "").strip().casefold() == "savings"
@@ -98,7 +99,7 @@ class BudgetManager:
                     item.setdefault("dynamic", False)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 4
+        self._data["schema_version"] = 5
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
