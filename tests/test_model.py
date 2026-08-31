@@ -103,6 +103,33 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(summary["daily_allowance"], 45)
         self.assertEqual(summary["rag"], "green")
 
+    def test_rag_uses_the_displayed_daily_allowance_at_threshold(self) -> None:
+        month = model.make_month("2027-03")
+        month["account_balance"] = 2207.03
+        month["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": "savings",
+                    "amount": 800,
+                }
+            )
+        ]
+
+        summary = model.calculate_month(
+            month,
+            settings={
+                "daily_green_threshold": 45,
+                "daily_yellow_threshold": 40,
+                "savings_target_threshold": 45,
+                "savings_floor_threshold": 40,
+            },
+            today=date(2026, 8, 31),
+        )
+
+        self.assertEqual(summary["daily_allowance"], 45)
+        self.assertEqual(summary["rag"], "green")
+
     def test_dynamic_savings_is_zero_when_daily_allowance_is_below_target(self) -> None:
         month = model.make_month("2026-09")
         month["payday"] = "2026-09-30"

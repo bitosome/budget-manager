@@ -18,6 +18,7 @@ class BudgetManagerPanel extends HTMLElement {
     this._hasConnected = false;
     this._listeningForNavigation = false;
     this._stickyFirstColumn = this._loadStickyFirstColumnPreference();
+    this._showPastMonths = this._loadShowPastMonthsPreference();
     this._matrixEditMode = false;
     this._handleLocationChanged = () => {
       if (this._isBudgetRoute()) this._showCurrentMonth();
@@ -76,6 +77,26 @@ class BudgetManagerPanel extends HTMLElement {
     this._stickyFirstColumn = !this._stickyFirstColumn;
     try {
       window.localStorage.setItem("budget-manager-sticky-first-column", String(this._stickyFirstColumn));
+    } catch (_err) {
+      // Keep the preference for this session when storage is unavailable.
+    }
+    this._render();
+  }
+
+  _loadShowPastMonthsPreference() {
+    try {
+      const stored = window.localStorage.getItem("budget-manager-show-past-months");
+      if (stored !== null) return stored === "true";
+    } catch (_err) {
+      // Storage can be unavailable in restricted browser contexts.
+    }
+    return true;
+  }
+
+  _togglePastMonths() {
+    this._showPastMonths = !this._showPastMonths;
+    try {
+      window.localStorage.setItem("budget-manager-show-past-months", String(this._showPastMonths));
     } catch (_err) {
       // Keep the preference for this session when storage is unavailable.
     }
@@ -259,7 +280,19 @@ class BudgetManagerPanel extends HTMLElement {
 
   _renderYearMatrix() {
     const years = [this._year, this._year + 1];
-    const months = years.flatMap((year) => Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`));
+    const allMonths = years.flatMap((year) => Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`));
+    const currentMonth = this._state.current_month;
+    const months = this._showPastMonths || !currentMonth
+      ? allMonths
+      : allMonths.filter((monthKey) => monthKey >= currentMonth);
+    const visibleYears = years
+      .map((year) => ({ year, count: months.filter((monthKey) => monthKey.startsWith(`${year}-`)).length }))
+      .filter(({ count }) => count > 0);
+    const matrixActions = `<div class="matrix-title-actions">
+      <button class="quiet past-months-toggle ${this._showPastMonths ? "" : "active"}" data-action="toggle-past-months" aria-pressed="${!this._showPastMonths}">${this._showPastMonths ? "Hide past months" : "Show past months"}</button>
+      ${this._canEdit ? `<button class="quiet matrix-edit-toggle ${this._matrixEditMode ? "active" : ""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode ? "Done editing" : "Edit values"}</button>` : ""}
+    </div>`;
+    const sectionTitle = `<div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>${matrixActions}</div>`;
     const rows = new Map();
     for (const monthKey of months) {
       const month = this._state.months[monthKey];
@@ -276,7 +309,10 @@ class BudgetManagerPanel extends HTMLElement {
       { kind: "savings", label: "Savings" },
     ];
     const ordered = [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
-    if (!ordered.length) return "";
+    if (!ordered.length) {
+      if (this._showPastMonths) return "";
+      return `<section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">${sectionTitle}<div class="empty">No planned items in the visible months.</div></section>`;
+    }
     const renderGroup = (group) => {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
@@ -287,12 +323,12 @@ class BudgetManagerPanel extends HTMLElement {
     };
     return `
       <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
-        <div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>${this._canEdit ? `<button class="quiet matrix-edit-toggle ${this._matrixEditMode ? "active" : ""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode ? "Done editing" : "Edit values"}</button>` : ""}</div>
+        ${sectionTitle}
         <div class="matrix-wrap">
-          <table class="matrix">
+          <table class="matrix" style="min-width:${205 + months.length * 74}px">
             <colgroup><col class="item-column">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
-              <tr class="matrix-years"><th>Year</th>${years.map((year) => `<th colspan="12">${year}</th>`).join("")}</tr>
+              <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
               <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${MONTH_NAMES[Number(key.slice(5)) - 1].slice(0, 3)}</th>`).join("")}</tr>
             </thead>
             <tbody>
@@ -418,6 +454,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "next-year") return this._load(this._year + 1);
     if (action === "choose-year") return this._openYearPicker();
     if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
+    if (action === "toggle-past-months") return this._togglePastMonths();
     if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
     if (action === "settings") return this._openSettings();
     if (action === "open-month") { this._month = button.dataset.month; return this._render(); }
@@ -768,10 +805,10 @@ class BudgetManagerPanel extends HTMLElement {
       button { border:0; cursor:pointer; }.quiet,.primary,.danger-button { border-radius:10px; padding:10px 14px; font-weight:650; }.quiet { background:var(--surface); border:1px solid var(--line); }.quiet:hover { border-color:var(--green); }.primary { background:var(--green); color:#fff; box-shadow:0 5px 14px rgba(52,120,90,.2); }.danger-button { color:var(--red); background:transparent; border:1px solid color-mix(in srgb, var(--red) 35%, transparent); }
       .year-toolbar,.month-toolbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:22px; }.year-switcher { display:flex; align-items:center; gap:8px; }.icon-button,.year-button { height:46px; border-radius:12px; background:var(--surface); border:1px solid var(--line); }.icon-button { width:46px; font-size:26px; }.year-button { min-width:150px; padding:0 22px; font-size:20px; font-weight:750; }
       .empty-plan { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:22px; padding:20px; border:1px dashed color-mix(in srgb,var(--green) 45%,var(--line)); border-radius:15px; background:var(--surface); }.empty-plan h2 { margin:5px 0; font-size:18px; }.empty-plan p { color:var(--muted); font-size:12px; }
-      .matrix-edit-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
+      .matrix-title-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:210px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.month-remaining { display:block; margin:17px 0; font-size:24px; }.negative { color:var(--red); }.month-card dl { margin:0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.item-count { display:block; margin-top:13px; padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }.rag-status { display:inline-block; margin-top:9px; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; min-width:1980px; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }

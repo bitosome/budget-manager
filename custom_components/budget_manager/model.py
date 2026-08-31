@@ -599,11 +599,12 @@ def calculate_month(
     )
     remaining = before_dynamic_savings - dynamic_savings
     daily_allowance = remaining / divisor if divisor else 0
+    displayed_daily_allowance = round(daily_allowance, 2)
     rag = (
         "green"
-        if daily_allowance >= green_threshold
+        if displayed_daily_allowance >= green_threshold
         else "yellow"
-        if daily_allowance >= yellow_threshold
+        if displayed_daily_allowance >= yellow_threshold
         else "red"
     )
 
@@ -633,7 +634,7 @@ def calculate_month(
         ),
         "total_savings": round(total_savings, 2),
         "remaining": round(remaining, 2),
-        "daily_allowance": round(daily_allowance, 2),
+        "daily_allowance": displayed_daily_allowance,
         "rag": rag,
         "green_threshold": green_threshold,
         "yellow_threshold": yellow_threshold,
