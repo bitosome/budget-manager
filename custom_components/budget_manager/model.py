@@ -11,6 +11,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from .estonian_payroll import EstonianPayrollError, normalize_income_calculation
+
 from .const import (
     DEFAULT_CYCLE_END_DAY,
     DEFAULT_CURRENCY,
@@ -131,7 +133,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -217,6 +219,13 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
     except (TypeError, ValueError) as err:
         raise BudgetValidationError("Sort order must be a number") from err
 
+    try:
+        income_calculation = normalize_income_calculation(
+            raw.get("income_calculation"), is_income=kind == KIND_INCOME
+        )
+    except EstonianPayrollError as err:
+        raise BudgetValidationError(str(err)) from err
+
     return {
         "id": existing_id or str(raw.get("id") or new_id()),
         "name": name,
@@ -238,6 +247,7 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         "recurrence": recurrence,
         "recurrence_end": recurrence_end,
         "needs_review": bool(raw.get("needs_review", False)),
+        "income_calculation": income_calculation,
         "dynamic": bool(raw.get("dynamic", kind == KIND_SAVINGS))
         if kind == KIND_SAVINGS
         else False,
@@ -681,15 +691,23 @@ def calculate_year(
 
 
 def current_month_key(data: dict[str, Any], *, today: date | None = None) -> str | None:
-    """Return current month, nearest future month, or latest available month."""
+    """Return the active budget cycle, nearest future month, or latest month."""
     today = today or date.today()
     keys = sorted(data.get("months", {}))
     if not keys:
         return None
-    current = today.strftime("%Y-%m")
-    if current in keys:
-        return current
-    return next((key for key in keys if key > current), keys[-1])
+    cycle_end_day = normalize_cycle_end_day(
+        data.get("settings", {}).get("cycle_end_day", DEFAULT_CYCLE_END_DAY)
+    )
+    cycle_end_this_month = clamp_day(today.year, today.month, cycle_end_day)
+    if today.day <= cycle_end_this_month:
+        active_date = today.replace(day=1) - timedelta(days=1)
+    else:
+        active_date = today
+    active = active_date.strftime("%Y-%m")
+    if active in keys:
+        return active
+    return next((key for key in keys if key > active), keys[-1])
 
 
 def event_rows(data: dict[str, Any]) -> list[dict[str, Any]]:

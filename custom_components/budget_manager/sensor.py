@@ -85,7 +85,11 @@ class BudgetSensor(BudgetEntity, SensorEntity):
         if month is None:
             return None
         return self.description.value_fn(
-            calculate_month(month, settings=self.manager.data.get("settings"))
+            calculate_month(
+                month,
+                settings=self.manager.data.get("settings"),
+                today=self.manager.today(),
+            )
         )
 
     @property
@@ -95,7 +99,9 @@ class BudgetSensor(BudgetEntity, SensorEntity):
         if month is None:
             return {}
         summary = calculate_month(
-            month, settings=self.manager.data.get("settings")
+            month,
+            settings=self.manager.data.get("settings"),
+            today=self.manager.today(),
         )
         return {
             "month": month["month"],

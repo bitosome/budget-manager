@@ -43,6 +43,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_upsert_item,
         ws_delete_item,
         ws_set_item_status,
+        ws_estonian_working_hours,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -64,6 +65,27 @@ def ws_get_state(
         connection.send_result(msg["id"], _manager(hass).snapshot(msg.get("year")))
     except BudgetValidationError as err:
         _error(connection, msg, err)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/estonian_working_hours",
+        vol.Required("month"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_estonian_working_hours(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return Estonia's standard working days and hours for one month."""
+    try:
+        result = await _manager(hass).async_estonian_working_hours(msg["month"])
+    except (BudgetValidationError, TypeError, ValueError) as err:
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
@@ -38,7 +38,7 @@ class BudgetCalendar(BudgetEntity, CalendarEntity):
     @property
     def event(self) -> CalendarEvent | None:
         """Return the next pending budget occurrence."""
-        today = date.today()
+        today = self.manager.today()
         rows = sorted(
             (
                 row

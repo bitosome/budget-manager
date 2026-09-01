@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
+from .estonian_calendar import EstonianWorkingHoursProvider
+from .estonian_payroll import (
+    EstonianPayrollError,
+    calculate_estonian_payroll,
+    normalize_income_calculation,
+)
 from .const import (
     DEFAULT_CYCLE_END_DAY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
@@ -60,6 +67,7 @@ class BudgetManager:
         self._data: dict[str, Any] = empty_data()
         self._lock = asyncio.Lock()
         self._listeners: set[Callable[[], None]] = set()
+        self._estonian_calendar = EstonianWorkingHoursProvider(hass)
 
     @property
     def data(self) -> dict[str, Any]:
@@ -87,6 +95,7 @@ class BudgetManager:
             migrated_items = []
             for item in month.get("items", []):
                 item.setdefault("needs_review", False)
+                item.setdefault("income_calculation", None)
                 if (
                     item.get("kind") == "expense"
                     and item.get("name", "").strip().casefold() == "savings"
@@ -99,7 +108,7 @@ class BudgetManager:
                     item.setdefault("dynamic", False)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 5
+        self._data["schema_version"] = 6
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -118,9 +127,10 @@ class BudgetManager:
 
     def snapshot(self, year: int | None = None) -> dict[str, Any]:
         """Return panel-ready state and calculations."""
+        today = self.today()
         available_years = sorted({int(key[:4]) for key in self._data["months"]})
-        current = current_month_key(self._data)
-        selected_year = year or datetime.now().year
+        current = current_month_key(self._data, today=today)
+        selected_year = year or today.year
         plan_years = (selected_year, selected_year + 1)
         return {
             "settings": deepcopy(self._data["settings"]),
@@ -130,18 +140,22 @@ class BudgetManager:
             "current_month": current,
             "selected_year": selected_year,
             "plan_years": list(plan_years),
-            "year": calculate_year(self._data, selected_year),
+            "year": calculate_year(self._data, selected_year, today=today),
             "months": {
-                key: self._month_payload(value)
+                key: self._month_payload(value, today=today)
                 for key, value in self._data["months"].items()
                 if int(key[:4]) in plan_years
             },
         }
 
-    def _month_payload(self, month: dict[str, Any]) -> dict[str, Any]:
+    def _month_payload(
+        self, month: dict[str, Any], *, today: date | None = None
+    ) -> dict[str, Any]:
         payload = deepcopy(month)
         payload["summary"] = calculate_month(
-            month, settings=self._data.get("settings")
+            month,
+            settings=self._data.get("settings"),
+            today=today or self.today(),
         )
         effective_amounts = payload["summary"]["effective_amounts"]
         for item in payload["items"]:
@@ -163,6 +177,10 @@ class BudgetManager:
     def export_data(self) -> dict[str, Any]:
         """Return the complete budget as a portable JSON document."""
         return export_data_document(self._data)
+
+    def today(self) -> date:
+        """Return today in Home Assistant's configured local timezone."""
+        return dt_util.now().date()
 
     async def async_import_data(self, document: dict[str, Any]) -> None:
         """Validate and replace the budget from a portable JSON document."""
@@ -222,7 +240,7 @@ class BudgetManager:
 
     def current_month(self) -> dict[str, Any] | None:
         """Return the current or nearest budget month."""
-        key = current_month_key(self._data)
+        key = current_month_key(self._data, today=self.today())
         return self._data["months"].get(key) if key else None
 
     async def async_create_month(
@@ -254,6 +272,7 @@ class BudgetManager:
                     target,
                     cycle_end_day=cycle_end_day,
                 )
+                await self._async_refresh_calculated_income(month, target)
             else:
                 month = make_month(target, cycle_end_day=cycle_end_day)
             self._data["months"][target] = month
@@ -296,6 +315,9 @@ class BudgetManager:
                         series_map=series_map,
                         cycle_end_day=cycle_end_day,
                     )
+                    await self._async_refresh_calculated_income(
+                        self._data["months"][target], target
+                    )
                 else:
                     self._data["months"][target] = make_month(
                         target,
@@ -303,7 +325,9 @@ class BudgetManager:
                         cycle_end_day=cycle_end_day,
                     )
             await self._async_commit()
-            return calculate_year(self._data, int(target_year))
+            return calculate_year(
+                self._data, int(target_year), today=self.today()
+            )
 
     async def async_update_month(self, month_key: str, changes: dict[str, Any]) -> None:
         """Update a month's manual balance or payday cycle end."""
@@ -365,8 +389,9 @@ class BudgetManager:
                 existing = None
                 raw_id = ""
 
+            merged = {**(existing or {}), **raw}
             normalized = normalize_item(
-                {**(existing or {}), **raw},
+                await self._async_prepare_calculated_income(merged, month_key),
                 existing_id=existing["id"] if existing else None,
             )
             if existing:
@@ -387,9 +412,19 @@ class BudgetManager:
                 series_id = normalized.get("series_id") or new_id()
                 for target in months:
                     target_month = self._data["months"].setdefault(
-                        target, make_month(target)
+                        target,
+                        make_month(
+                            target,
+                            cycle_end_day=self._data["settings"].get(
+                                "cycle_end_day", DEFAULT_CYCLE_END_DAY
+                            ),
+                        ),
                     )
-                    occurrence = deepcopy(normalized)
+                    occurrence = normalize_item(
+                        await self._async_prepare_calculated_income(
+                            deepcopy(normalized), target
+                        )
+                    )
                     occurrence["id"] = new_id()
                     occurrence["series_id"] = series_id
                     occurrence["status"] = STATUS_PENDING
@@ -398,6 +433,56 @@ class BudgetManager:
                 normalized["series_id"] = series_id
             await self._async_commit()
             return deepcopy(normalized)
+
+    async def async_estonian_working_hours(self, month_key: str) -> dict[str, Any]:
+        """Return standard Estonian working time for a calendar month."""
+        validate_month_key(month_key)
+        return await self._estonian_calendar.async_month(month_key)
+
+    async def _async_prepare_calculated_income(
+        self, raw: dict[str, Any], month_key: str
+    ) -> dict[str, Any]:
+        """Resolve automatic working hours and calculate an income amount."""
+        try:
+            config = normalize_income_calculation(
+                raw.get("income_calculation"),
+                is_income=raw.get("kind") == "income",
+            )
+        except EstonianPayrollError as err:
+            raise BudgetValidationError(str(err)) from err
+        prepared = {**raw, "income_calculation": config}
+        if config is None:
+            return prepared
+        if config["working_hours_mode"] == "automatic":
+            working_time = await self._estonian_calendar.async_month(month_key)
+            config.update(
+                {
+                    "working_hours": working_time["working_hours"],
+                    "working_days": working_time["working_days"],
+                    "calendar_source": working_time["calendar_source"],
+                }
+            )
+        try:
+            calculation = calculate_estonian_payroll(
+                config, payment_year=int(month_key[:4])
+            )
+        except EstonianPayrollError as err:
+            raise BudgetValidationError(str(err)) from err
+        prepared["income_calculation"] = calculation
+        prepared["amount"] = calculation["net_income"]
+        return prepared
+
+    async def _async_refresh_calculated_income(
+        self, month: dict[str, Any], month_key: str
+    ) -> None:
+        """Recalculate copied hourly income for the target month."""
+        for index, item in enumerate(month.get("items", [])):
+            if not item.get("income_calculation"):
+                continue
+            prepared = await self._async_prepare_calculated_income(item, month_key)
+            month["items"][index] = normalize_item(
+                prepared, existing_id=item["id"]
+            )
 
     async def async_delete_item(
         self, month_key: str, item_id: str, *, scope: str = "this"
@@ -451,7 +536,9 @@ class BudgetManager:
                 and item.get("status") == STATUS_PENDING
             ):
                 summary = calculate_month(
-                    month, settings=self._data.get("settings")
+                    month,
+                    settings=self._data.get("settings"),
+                    today=self.today(),
                 )
                 item["amount"] = summary["effective_amounts"].get(
                     item["id"], item.get("amount", 0)

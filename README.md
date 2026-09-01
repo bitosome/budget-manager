@@ -14,7 +14,9 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - A visible toggle in the plan table's `Item` header pins or unpins the first column per device; mobile defaults to unpinned for easier horizontal scrolling.
 - Optional inline plan-table editing for amounts. New cells create one-time items with default properties and are highlighted as requiring review in the month view until their details are saved.
 - Detailed month view with expected income, expenditures, manual account balance, remaining forecast, and automatic EUR/day calculation.
-- The **Budget** sidebar always opens the current month (or the nearest available budget month).
+- The **Budget** sidebar opens the active budget cycle: with the default cycle end on the 2nd, the previous month remains active through the 2nd and the new month opens on the 3rd.
+- Advanced Estonian hourly income converts hourly gross pay and that month's working-time fund into estimated net income, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
+- Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
 - Add, edit, and delete income, expenditures, and savings.
 - One-time, monthly, and yearly items.
 - Required end date for recurring items.
@@ -57,6 +59,14 @@ automatic savings = clamp(planned savings, minimum savings, maximum savings)
 ```
 
 When an automatic savings item is marked paid/transferred, its calculated amount is frozen on that occurrence and it stops reducing the daily allowance. Update the account balance manually after the transfer, as with any other real account movement.
+
+### Estonian hourly income
+
+For an income item, enable **Calculate monthly net income from an hourly gross rate**. Automatic working hours use an eight-hour Monday–Friday schedule, remove Estonian public holidays, and apply the three-hour reductions before New Year's Day, Independence Day, Victory Day, and Christmas Eve. Recurring income is recalculated separately for every month; for example, August 2026 has 20 working days and 160 working hours.
+
+Holiday dates are requested on demand from the public [Nager.Date API](https://date.nager.at/Api). Only the year and Estonia country code are sent. No item names, rates, balances, or other budget data leave Home Assistant. If the API is unavailable, Budget Manager calculates the statutory Estonian holidays locally.
+
+The built-in payroll defaults follow the Estonian Tax and Customs Board's published 2026 rates: 22% income tax, €700 monthly basic exemption, 33% social tax with an €886 minimum base, 1.6% employee and 0.8% employer unemployment insurance, and optional 2/4/6% funded pension. Future months continue using the latest built-in rates until the integration is updated. The result is a planning estimate, not payroll or tax advice.
 
 ## Installation
 
@@ -106,6 +116,7 @@ The sidebar panel is the primary CRUD interface. Actions are intended for automa
 Copying a month or year:
 
 - Copies names, amounts, due days, categories, item notes, and special/renewal markers.
+- Recalculates copied Estonian hourly income using the target month's working hours.
 - Resets account balances.
 - Resets paid/received/skipped items to pending.
 - Assigns fresh occurrence IDs.

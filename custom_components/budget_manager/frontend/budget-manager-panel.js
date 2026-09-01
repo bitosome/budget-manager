@@ -34,7 +34,9 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   set narrow(value) {
-    this._narrow = value;
+    const changed = this._narrow !== Boolean(value);
+    this._narrow = Boolean(value);
+    if (changed && this._initialized) this._render();
   }
 
   set panel(value) {
@@ -101,6 +103,13 @@ class BudgetManagerPanel extends HTMLElement {
       // Keep the preference for this session when storage is unavailable.
     }
     this._render();
+  }
+
+  _toggleNativeMenu() {
+    this.dispatchEvent(new CustomEvent("hass-toggle-menu", {
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   _showCurrentMonth() {
@@ -214,13 +223,16 @@ class BudgetManagerPanel extends HTMLElement {
 
   _renderHeader() {
     if (!this._state) {
-      return `<header><div class="brand"><span class="logo">€</span><div><h1>Budget Manager</h1><p>Local Home Assistant budget</p></div></div></header>`;
+      return `<header><div class="header-leading">${this._narrow ? `<button class="native-menu-button" data-action="native-menu" aria-label="Open Home Assistant menu" title="Open Home Assistant menu"><span aria-hidden="true"></span></button>` : ""}<div class="brand"><span class="logo">€</span><div><h1>Budget Manager</h1><p>Local Home Assistant budget</p></div></div></div></header>`;
     }
     return `
       <header class="${this._month ? "month-header" : "plan-header"}">
-        <div class="brand">
-          <span class="logo">€</span>
-          <div><h1>Budget Manager</h1><p>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</p></div>
+        <div class="header-leading">
+          ${this._narrow ? `<button class="native-menu-button" data-action="native-menu" aria-label="Open Home Assistant menu" title="Open Home Assistant menu"><span aria-hidden="true"></span></button>` : ""}
+          <div class="brand">
+            <span class="logo">€</span>
+            <div><h1>Budget Manager</h1><p>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</p></div>
+          </div>
         </div>
         <div class="header-actions">
           ${this._month ? `<button class="quiet" data-action="back-year">← Plan</button>` : ""}
@@ -424,6 +436,7 @@ class BudgetManagerPanel extends HTMLElement {
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(item.recurrence_end)}` : " · one-time"}
+          ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h gross` : ""}
           ${item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
@@ -448,6 +461,7 @@ class BudgetManagerPanel extends HTMLElement {
   async _handleAction(event) {
     const button = event.currentTarget;
     const action = button.dataset.action;
+    if (action === "native-menu") return this._toggleNativeMenu();
     if (action === "refresh") return this._load();
     if (action === "back-year") { this._month = null; return this._render(); }
     if (action === "prev-year") return this._load(this._year - 1);
@@ -506,6 +520,7 @@ class BudgetManagerPanel extends HTMLElement {
         item: existing ? {
           ...existing,
           amount,
+          income_calculation: existing.kind === "income" ? null : existing.income_calculation,
           needs_review: true,
         } : {
           name: input.dataset.name,
@@ -688,6 +703,9 @@ class BudgetManagerPanel extends HTMLElement {
   _openItemEditor(itemId = null) {
     const month = this._state.months[this._month];
     const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
+    const incomeCalculation = item?.income_calculation || null;
+    const automaticWorkingHours = (incomeCalculation?.working_hours_mode || "automatic") === "automatic";
+    const fundedPensionRate = Number(incomeCalculation?.funded_pension_rate || 0);
     const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
     const fields = `
       ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
@@ -696,6 +714,31 @@ class BudgetManagerPanel extends HTMLElement {
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
+      <fieldset class="settings-group income-calculation" id="income-calculation" hidden>
+        <legend>Estonian hourly income</legend>
+        <label class="check"><input type="checkbox" name="estonian_hourly" id="estonian-hourly" ${incomeCalculation ? "checked" : ""}><span>Calculate monthly net income from an hourly gross rate</span></label>
+        <div id="estonian-payroll-fields" hidden>
+          <div class="two-col">
+            ${this._field("Hourly gross, EUR", "hourly_gross", incomeCalculation?.hourly_gross ?? "", "number", "min=0.01 step=0.01")}
+            ${this._field("Working hours", "working_hours", incomeCalculation?.working_hours ?? "", "number", "min=0.01 step=0.01")}
+          </div>
+          <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${automaticWorkingHours ? "checked" : ""}><span>Use Estonia's standard monthly working hours automatically</span></label>
+          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
+          <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${incomeCalculation?.apply_social_tax_minimum !== false ? "checked" : ""}><span>Apply the social-tax minimum monthly base (€886)</span></label>
+          <div class="tax-free-setting">
+            <label class="check"><input type="checkbox" name="apply_tax_free_income" ${incomeCalculation?.apply_tax_free_income !== false ? "checked" : ""}><span>Apply tax-free income</span></label>
+            ${this._field("Tax-free income, EUR", "tax_free_income", incomeCalculation?.tax_free_income ?? 700, "number", "min=0 step=0.01")}
+          </div>
+          <label class="check"><input type="checkbox" name="employee_unemployment" ${incomeCalculation?.employee_unemployment !== false ? "checked" : ""}><span>Employee unemployment insurance (1.6%)</span></label>
+          <label class="check"><input type="checkbox" name="employer_unemployment" ${incomeCalculation?.employer_unemployment !== false ? "checked" : ""}><span>Employer unemployment insurance (0.8%)</span></label>
+          <label class="check"><input type="checkbox" name="funded_pension_joined" id="funded-pension-joined" ${fundedPensionRate > 0 ? "checked" : ""}><span>Joined the funded pension</span></label>
+          <div class="pension-rates" role="radiogroup" aria-label="Funded pension contribution rate">
+            ${[0, 2, 4, 6].map((rate) => `<label><input type="radio" name="funded_pension_rate" value="${rate}" ${rate === fundedPensionRate ? "checked" : ""}><span>${rate}%</span></label>`).join("")}
+          </div>
+          <div class="payroll-preview" id="payroll-preview"></div>
+          <p class="form-help">Tax calculation uses the latest built-in Estonian rules: 2026 income tax 22%, social tax 33%, and the options above. Future years continue using these known rates until Budget Manager is updated.</p>
+        </div>
+      </fieldset>
       <label class="check" id="dynamic-savings"><input type="checkbox" name="dynamic" ${!item || item?.dynamic ? "checked" : ""}><span>Adjust automatically when the daily allowance leaves the acceptable RAG range</span></label>
       <p class="form-help" id="dynamic-savings-help">The amount is the monthly savings plan. It is preserved inside the automatic savings range from Settings and adjusted outside that range. The transfer is frozen when marked paid.</p>
       <div class="two-col">
@@ -713,16 +756,36 @@ class BudgetManagerPanel extends HTMLElement {
     const extra = item ? `<button type="button" class="danger-button" id="delete-item">Delete</button>` : "";
     const modal = this._openModal(item ? "Edit item" : "Add item", fields, item ? "Save" : "Add", async (form) => {
       const recurrence = form.get("recurrence");
+      const kind = form.get("kind");
+      const useEstonianHourly = kind === "income" && form.has("estonian_hourly");
+      const hourlyGross = Number(form.get("hourly_gross"));
+      const workingHours = Number(form.get("working_hours"));
+      if (useEstonianHourly && (!Number.isFinite(hourlyGross) || hourlyGross <= 0)) throw new Error("Hourly gross must be greater than zero.");
+      if (useEstonianHourly && (!Number.isFinite(workingHours) || workingHours <= 0)) throw new Error("Working hours must be greater than zero.");
       await this._hass.callWS({
         type: "budget_manager/upsert_item",
         month: this._month,
         scope: form.get("scope") || "this",
         item: {
           ...(item || {}),
-          name: form.get("name"), kind: form.get("kind"), amount: Number(form.get("amount")),
+          name: form.get("name"), kind, amount: Number(form.get("amount")),
           due_day: form.get("due_day") ? Number(form.get("due_day")) : null,
           category: form.get("category"), recurrence,
           recurrence_end: recurrence === "single" ? null : form.get("recurrence_end"),
+          income_calculation: useEstonianHourly ? {
+            mode: "estonian_hourly",
+            hourly_gross: hourlyGross,
+            working_hours_mode: form.has("automatic_working_hours") ? "automatic" : "manual",
+            working_hours: workingHours,
+            working_days: Number(modal.root.querySelector("#working-hours-status").dataset.workingDays || 0),
+            calendar_source: modal.root.querySelector("#working-hours-status").dataset.calendarSource || (form.has("automatic_working_hours") ? "pending" : "manual"),
+            apply_social_tax_minimum: form.has("apply_social_tax_minimum"),
+            apply_tax_free_income: form.has("apply_tax_free_income"),
+            tax_free_income: Number(form.get("tax_free_income")),
+            employee_unemployment: form.has("employee_unemployment"),
+            employer_unemployment: form.has("employer_unemployment"),
+            funded_pension_rate: form.has("funded_pension_joined") ? Number(form.get("funded_pension_rate")) : 0,
+          } : null,
           dynamic: form.has("dynamic"),
           needs_review: false,
           special: form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
@@ -738,13 +801,103 @@ class BudgetManagerPanel extends HTMLElement {
     const dynamicSavings = modal.root.querySelector("#dynamic-savings");
     const dynamicSavingsHelp = modal.root.querySelector("#dynamic-savings-help");
     const amountInput = modal.root.querySelector('[name="amount"]');
+    const incomeSection = modal.root.querySelector("#income-calculation");
+    const estonianHourly = modal.root.querySelector("#estonian-hourly");
+    const payrollFields = modal.root.querySelector("#estonian-payroll-fields");
+    const automaticHours = modal.root.querySelector("#automatic-working-hours");
+    const hourlyGrossInput = modal.root.querySelector('[name="hourly_gross"]');
+    const workingHoursInput = modal.root.querySelector('[name="working_hours"]');
+    const workingHoursStatus = modal.root.querySelector("#working-hours-status");
+    const refreshWorkingHours = modal.root.querySelector("#refresh-working-hours");
+    const fundedPensionJoined = modal.root.querySelector("#funded-pension-joined");
+    const payrollPreview = modal.root.querySelector("#payroll-preview");
+    workingHoursStatus.dataset.workingDays = String(incomeCalculation?.working_days || 0);
+    workingHoursStatus.dataset.calendarSource = incomeCalculation?.calendar_source || (automaticWorkingHours ? "pending" : "manual");
+    const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+    const updatePayrollPreview = () => {
+      if (kindSelect.value !== "income" || !estonianHourly.checked) return;
+      const hourlyGross = Number(hourlyGrossInput.value);
+      const workingHours = Number(workingHoursInput.value);
+      if (!Number.isFinite(hourlyGross) || hourlyGross <= 0 || !Number.isFinite(workingHours) || workingHours <= 0) {
+        payrollPreview.innerHTML = `<span>Enter an hourly gross rate and working hours to calculate net income.</span>`;
+        return;
+      }
+      const gross = roundMoney(hourlyGross * workingHours);
+      const employeeUnemployment = modal.root.querySelector('[name="employee_unemployment"]').checked ? roundMoney(gross * 0.016) : 0;
+      const pensionRate = fundedPensionJoined.checked ? Number(modal.root.querySelector('[name="funded_pension_rate"]:checked')?.value || 0) : 0;
+      const pension = roundMoney(gross * pensionRate / 100);
+      const applyTaxFree = modal.root.querySelector('[name="apply_tax_free_income"]').checked;
+      const taxFree = applyTaxFree ? Math.min(gross, Number(modal.root.querySelector('[name="tax_free_income"]').value || 0)) : 0;
+      const taxable = Math.max(0, gross - employeeUnemployment - pension - taxFree);
+      const incomeTax = roundMoney(taxable * 0.22);
+      const net = roundMoney(gross - employeeUnemployment - pension - incomeTax);
+      const socialBase = modal.root.querySelector('[name="apply_social_tax_minimum"]').checked ? Math.max(gross, 886) : gross;
+      const socialTax = roundMoney(socialBase * 0.33);
+      const employerUnemployment = modal.root.querySelector('[name="employer_unemployment"]').checked ? roundMoney(gross * 0.008) : 0;
+      const employerCost = roundMoney(gross + socialTax + employerUnemployment);
+      amountInput.value = net.toFixed(2);
+      payrollPreview.innerHTML = `<div><span>Gross</span><strong>${this._money(gross)}</strong></div><div><span>Net income</span><strong>${this._money(net)}</strong></div><div><span>Income tax</span><strong>${this._money(incomeTax)}</strong></div><div><span>Employer cost</span><strong>${this._money(employerCost)}</strong></div>`;
+    };
+    const updatePayrollControls = () => {
+      const enabled = kindSelect.value === "income" && estonianHourly.checked;
+      payrollFields.hidden = !enabled;
+      amountInput.readOnly = enabled;
+      workingHoursInput.readOnly = enabled && automaticHours.checked;
+      refreshWorkingHours.hidden = !enabled || !automaticHours.checked;
+      fundedPensionJoined.closest("label").classList.toggle("muted", !fundedPensionJoined.checked);
+      modal.root.querySelectorAll('[name="funded_pension_rate"]').forEach((radio) => { radio.disabled = !fundedPensionJoined.checked; });
+      updatePayrollPreview();
+    };
+    const loadWorkingHours = async () => {
+      if (kindSelect.value !== "income" || !estonianHourly.checked || !automaticHours.checked) return;
+      refreshWorkingHours.disabled = true;
+      workingHoursStatus.textContent = "Loading Estonia working hours…";
+      try {
+        const result = await this._hass.callWS({ type: "budget_manager/estonian_working_hours", month: this._month });
+        workingHoursInput.value = Number(result.working_hours).toFixed(2);
+        workingHoursStatus.dataset.workingDays = String(result.working_days);
+        workingHoursStatus.dataset.calendarSource = result.calendar_source;
+        const source = result.calendar_source === "nager_date" ? "Nager.Date" : "statutory offline fallback";
+        workingHoursStatus.textContent = `${result.working_days} working days · ${result.working_hours} hours · ${source}`;
+        updatePayrollPreview();
+      } catch (err) {
+        workingHoursStatus.textContent = "Working hours could not be refreshed; the server will use its statutory fallback when saving.";
+        this._showError(err);
+      } finally {
+        refreshWorkingHours.disabled = false;
+      }
+    };
     const updateKind = () => {
-      const visible = kindSelect.value === "savings";
-      dynamicSavings.hidden = !visible;
-      dynamicSavingsHelp.hidden = !visible;
-      if (visible && amountInput.value === "") amountInput.value = "0";
+      const savingsVisible = kindSelect.value === "savings";
+      dynamicSavings.hidden = !savingsVisible;
+      dynamicSavingsHelp.hidden = !savingsVisible;
+      incomeSection.hidden = kindSelect.value !== "income";
+      if (savingsVisible && amountInput.value === "") amountInput.value = "0";
+      updatePayrollControls();
     };
     kindSelect.onchange = updateKind;
+    estonianHourly.onchange = () => {
+      updatePayrollControls();
+      if (estonianHourly.checked && automaticHours.checked && !workingHoursInput.value) loadWorkingHours();
+    };
+    automaticHours.onchange = () => {
+      workingHoursStatus.dataset.calendarSource = automaticHours.checked ? "pending" : "manual";
+      updatePayrollControls();
+      if (automaticHours.checked) loadWorkingHours();
+      else workingHoursStatus.textContent = "Manual working hours";
+    };
+    fundedPensionJoined.onchange = () => {
+      const selected = modal.root.querySelector('[name="funded_pension_rate"]:checked');
+      if (fundedPensionJoined.checked && Number(selected?.value || 0) === 0) {
+        modal.root.querySelector('[name="funded_pension_rate"][value="2"]').checked = true;
+      }
+      updatePayrollControls();
+    };
+    refreshWorkingHours.onclick = loadWorkingHours;
+    payrollFields.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("input", updatePayrollPreview);
+      input.addEventListener("change", updatePayrollControls);
+    });
     updateKind();
     if (item) modal.root.querySelector("#delete-item").onclick = async () => {
       const scope = item.series_id && window.confirm("Delete this and all future unpaid occurrences?\n\nOK = future series, Cancel = only this occurrence") ? "future" : "this";
@@ -795,10 +948,10 @@ class BudgetManagerPanel extends HTMLElement {
   _styles() {
     return `
       :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --red: #a64a42; --amber: #a36d00; display:block; min-height:100%; overflow-x:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
-      * { box-sizing:border-box; } button, input, select, textarea { font:inherit; } button { color:inherit; }
+      * { box-sizing:border-box; } [hidden] { display:none !important; } button, input, select, textarea { font:inherit; } button { color:inherit; }
       .app { min-height:100vh; overflow-x:hidden; } .app.is-loading { cursor:progress; }
       header { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:18px clamp(18px,4vw,54px); background:color-mix(in srgb, var(--surface) 94%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(16px); }
-      .brand { display:flex; align-items:center; gap:13px; }.logo { width:43px; height:43px; display:grid; place-items:center; border-radius:13px; background:var(--green); color:white; font-size:24px; font-weight:700; box-shadow:0 8px 18px rgba(52,120,90,.24); }
+      .header-leading,.brand { display:flex; align-items:center; min-width:0; }.header-leading { gap:7px; }.brand { gap:13px; }.logo { width:43px; height:43px; display:grid; place-items:center; flex:0 0 43px; border-radius:13px; background:var(--green); color:white; font-size:24px; font-weight:700; box-shadow:0 8px 18px rgba(52,120,90,.24); }.native-menu-button { position:relative; width:43px; height:43px; flex:0 0 43px; border-radius:50%; background:transparent; }.native-menu-button:hover { background:var(--line); }.native-menu-button span,.native-menu-button span::before,.native-menu-button span::after { position:absolute; left:11px; width:21px; height:2px; border-radius:999px; background:currentColor; content:""; }.native-menu-button span { top:20px; }.native-menu-button span::before { top:-7px; left:0; }.native-menu-button span::after { top:7px; left:0; }
       h1,h2,p { margin:0; } h1 { font-size:20px; line-height:1.1; } .brand p, .section-title p, .updated { color:var(--muted); font-size:12px; margin-top:4px; }
       .header-actions,.toolbar-actions { display:flex; align-items:center; gap:9px; }.read-only { padding:7px 10px; border-radius:999px; background:var(--line); color:var(--muted); font-size:12px; }
       main { max-width:1500px; margin:0 auto; padding:28px clamp(16px,4vw,54px) 70px; }
@@ -814,10 +967,11 @@ class BudgetManagerPanel extends HTMLElement {
       .balance-value { display:block; }
       .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { padding:20px; overflow:auto; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
       .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }
+      #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-      @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; } }
+      @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; } }
       @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header [data-action="settings"],.header-actions [data-action="refresh"] { display:none; } }
     `;
   }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import importlib
 from pathlib import Path
 import sys
@@ -21,6 +21,9 @@ sys.modules.setdefault("custom_components", custom_components)
 sys.modules.setdefault("custom_components.budget_manager", budget_package)
 
 model = importlib.import_module("custom_components.budget_manager.model")
+payroll = importlib.import_module(
+    "custom_components.budget_manager.estonian_payroll"
+)
 
 
 class _FakeStore:
@@ -42,12 +45,24 @@ homeassistant_helpers = types.ModuleType("homeassistant.helpers")
 homeassistant_helpers.__path__ = []
 homeassistant_storage = types.ModuleType("homeassistant.helpers.storage")
 homeassistant_storage.Store = _FakeStore
+homeassistant_aiohttp = types.ModuleType("homeassistant.helpers.aiohttp_client")
+homeassistant_aiohttp.async_get_clientsession = lambda _hass: None
+homeassistant_util = types.ModuleType("homeassistant.util")
+homeassistant_util.__path__ = []
+homeassistant_util_dt = types.ModuleType("homeassistant.util.dt")
+homeassistant_util_dt.now = lambda: datetime.now().astimezone()
 sys.modules.setdefault("homeassistant", homeassistant)
 sys.modules.setdefault("homeassistant.core", homeassistant_core)
 sys.modules.setdefault("homeassistant.helpers", homeassistant_helpers)
 sys.modules.setdefault("homeassistant.helpers.storage", homeassistant_storage)
+sys.modules.setdefault("homeassistant.helpers.aiohttp_client", homeassistant_aiohttp)
+sys.modules.setdefault("homeassistant.util", homeassistant_util)
+sys.modules.setdefault("homeassistant.util.dt", homeassistant_util_dt)
 
 manager_module = importlib.import_module("custom_components.budget_manager.manager")
+calendar_module = importlib.import_module(
+    "custom_components.budget_manager.estonian_calendar"
+)
 
 
 class BudgetModelTests(unittest.TestCase):
@@ -63,6 +78,69 @@ class BudgetModelTests(unittest.TestCase):
                 model.BudgetValidationError
             ):
                 model.normalize_cycle_end_day(invalid)
+
+    def test_active_budget_month_remains_previous_through_cycle_end(self) -> None:
+        data = model.empty_data()
+        data["settings"]["cycle_end_day"] = 2
+        data["months"]["2026-08"] = model.make_month("2026-08")
+        data["months"]["2026-09"] = model.make_month("2026-09")
+
+        self.assertEqual(
+            model.current_month_key(data, today=date(2026, 9, 1)), "2026-08"
+        )
+        self.assertEqual(
+            model.current_month_key(data, today=date(2026, 9, 2)), "2026-08"
+        )
+        self.assertEqual(
+            model.current_month_key(data, today=date(2026, 9, 3)), "2026-09"
+        )
+
+    def test_estonian_august_working_hours_match_public_calendar(self) -> None:
+        holidays = payroll.statutory_estonian_holidays(2026)
+        result = payroll.estonian_working_time("2026-08", holidays)
+
+        self.assertEqual(result["working_days"], 20)
+        self.assertEqual(result["working_hours"], 160)
+        self.assertIn("2026-08-20", result["public_holidays"])
+
+    def test_estonian_working_hours_include_shortened_preholiday_days(self) -> None:
+        holidays = payroll.statutory_estonian_holidays(2026)
+        holidays.update(payroll.statutory_estonian_holidays(2027))
+
+        february = payroll.estonian_working_time("2026-02", holidays)
+        december = payroll.estonian_working_time("2026-12", holidays)
+
+        self.assertEqual(february["working_hours"], 149)
+        self.assertEqual(february["shortened_workdays"], ["2026-02-23"])
+        self.assertEqual(december["working_hours"], 162)
+        self.assertEqual(
+            december["shortened_workdays"], ["2026-12-23", "2026-12-31"]
+        )
+
+    def test_estonian_hourly_payroll_defaults_match_2026_rules(self) -> None:
+        result = payroll.calculate_estonian_payroll(
+            {
+                "mode": "estonian_hourly",
+                "hourly_gross": 14,
+                "working_hours_mode": "automatic",
+                "working_hours": 160,
+                "apply_social_tax_minimum": True,
+                "apply_tax_free_income": True,
+                "tax_free_income": 700,
+                "employee_unemployment": True,
+                "employer_unemployment": True,
+                "funded_pension_rate": 0,
+            },
+            payment_year=2026,
+        )
+
+        self.assertEqual(result["gross_income"], 2240)
+        self.assertEqual(result["employee_unemployment_amount"], 35.84)
+        self.assertEqual(result["income_tax_amount"], 330.92)
+        self.assertEqual(result["net_income"], 1873.24)
+        self.assertEqual(result["social_tax_amount"], 739.2)
+        self.assertEqual(result["employer_unemployment_amount"], 17.92)
+        self.assertEqual(result["employer_cost"], 2997.12)
 
     def test_dynamic_savings_preserves_plan_inside_rag_band(self) -> None:
         month = model.make_month("2026-09")
@@ -305,6 +383,50 @@ class BudgetModelTests(unittest.TestCase):
             imported["months"]["2026-09"]["items"][0]["needs_review"]
         )
 
+    def test_portable_export_preserves_hourly_income_configuration(self) -> None:
+        data = model.empty_data()
+        month = model.make_month("2026-08")
+        calculation = payroll.calculate_estonian_payroll(
+            {
+                "mode": "estonian_hourly",
+                "hourly_gross": 14,
+                "working_hours_mode": "automatic",
+                "working_hours": 160,
+                "working_days": 20,
+                "calendar_source": "nager_date",
+                "apply_social_tax_minimum": True,
+                "apply_tax_free_income": True,
+                "tax_free_income": 700,
+                "employee_unemployment": True,
+                "employer_unemployment": True,
+                "funded_pension_rate": 0,
+            },
+            payment_year=2026,
+        )
+        month["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Hourly salary",
+                    "kind": "income",
+                    "amount": calculation["net_income"],
+                    "income_calculation": calculation,
+                }
+            )
+        ]
+        data["months"]["2026-08"] = month
+
+        imported = model.normalize_import_document(
+            model.export_data_document(data)
+        )
+        restored = imported["months"]["2026-08"]["items"][0]
+
+        self.assertEqual(restored["amount"], 1873.24)
+        self.assertEqual(restored["income_calculation"]["hourly_gross"], 14)
+        self.assertEqual(restored["income_calculation"]["working_hours"], 160)
+        self.assertEqual(
+            restored["income_calculation"]["calendar_source"], "nager_date"
+        )
+
     def test_import_rejects_non_budget_json(self) -> None:
         with self.assertRaisesRegex(model.BudgetValidationError, "Not a Budget"):
             model.normalize_import_document({"format": "other", "version": 1})
@@ -345,6 +467,125 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len({item["series_id"] for item in occurrences}), 1)
         self.assertEqual(len({item["id"] for item in occurrences}), 3)
+
+    async def test_recurring_hourly_income_uses_each_months_working_hours(self) -> None:
+        class FakeCalendar:
+            async def async_month(self, month_key):
+                hours = {"2026-08": 160, "2026-09": 176}[month_key]
+                return {
+                    "working_days": hours // 8,
+                    "working_hours": hours,
+                    "calendar_source": "test",
+                }
+
+        self.manager._estonian_calendar = FakeCalendar()
+        self.manager.data["months"]["2026-08"] = model.make_month("2026-08")
+        await self.manager.async_upsert_item(
+            "2026-08",
+            {
+                "name": "Hourly salary",
+                "kind": "income",
+                "amount": 0,
+                "recurrence": "monthly",
+                "recurrence_end": "2026-09-30",
+                "income_calculation": {
+                    "mode": "estonian_hourly",
+                    "hourly_gross": 14,
+                    "working_hours_mode": "automatic",
+                    "apply_social_tax_minimum": True,
+                    "apply_tax_free_income": True,
+                    "tax_free_income": 700,
+                    "employee_unemployment": True,
+                    "employer_unemployment": True,
+                    "funded_pension_rate": 0,
+                },
+            },
+        )
+
+        august = self.manager.data["months"]["2026-08"]["items"][0]
+        september = self.manager.data["months"]["2026-09"]["items"][0]
+        self.assertEqual(august["income_calculation"]["working_hours"], 160)
+        self.assertEqual(september["income_calculation"]["working_hours"], 176)
+        self.assertEqual(august["amount"], 1873.24)
+        self.assertEqual(september["amount"], 2045.17)
+
+    async def test_copied_hourly_income_uses_target_month_working_hours(self) -> None:
+        class FakeCalendar:
+            async def async_month(self, month_key):
+                hours = {"2026-08": 160, "2026-10": 176}[month_key]
+                return {
+                    "working_days": hours // 8,
+                    "working_hours": hours,
+                    "calendar_source": "test",
+                }
+
+        self.manager._estonian_calendar = FakeCalendar()
+        self.manager.data["months"]["2026-08"] = model.make_month("2026-08")
+        await self.manager.async_upsert_item(
+            "2026-08",
+            {
+                "name": "Hourly salary",
+                "kind": "income",
+                "amount": 0,
+                "recurrence": "single",
+                "income_calculation": {
+                    "mode": "estonian_hourly",
+                    "hourly_gross": 14,
+                    "working_hours_mode": "automatic",
+                    "apply_social_tax_minimum": True,
+                    "apply_tax_free_income": True,
+                    "tax_free_income": 700,
+                    "employee_unemployment": True,
+                    "employer_unemployment": True,
+                    "funded_pension_rate": 0,
+                },
+            },
+        )
+
+        await self.manager.async_create_month(
+            "2026-10", source="2026-08"
+        )
+        copied = self.manager.data["months"]["2026-10"]["items"][0]
+
+        self.assertEqual(copied["income_calculation"]["working_hours"], 176)
+        self.assertEqual(copied["amount"], 2045.17)
+
+    async def test_estonian_calendar_provider_uses_public_api_response(self) -> None:
+        class FakeResponse:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def json(self):
+                return [
+                    {
+                        "date": "2026-08-20",
+                        "countryCode": "EE",
+                        "global": True,
+                        "types": ["Public"],
+                    }
+                ]
+
+        class FakeSession:
+            def get(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        original = calendar_module.async_get_clientsession
+        calendar_module.async_get_clientsession = lambda _hass: FakeSession()
+        try:
+            provider = calendar_module.EstonianWorkingHoursProvider(object())
+            result = await provider.async_month("2026-08")
+        finally:
+            calendar_module.async_get_clientsession = original
+
+        self.assertEqual(result["calendar_source"], "nager_date")
+        self.assertEqual(result["working_days"], 20)
+        self.assertEqual(result["working_hours"], 160)
 
     async def test_delete_future_preserves_paid_history(self) -> None:
         await self.manager.async_upsert_item(
@@ -485,6 +726,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(migrated["kind"], "savings")
         self.assertTrue(migrated["dynamic"])
         self.assertFalse(migrated["needs_review"])
+        self.assertIsNone(migrated["income_calculation"])
 
     async def test_existing_zero_value_expenses_are_preserved(self) -> None:
         manager = manager_module.BudgetManager(object(), "old-zero")
