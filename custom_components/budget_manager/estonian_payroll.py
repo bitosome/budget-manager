@@ -17,6 +17,7 @@ SOCIAL_TAX_MINIMUM_BASE = Decimal("886")
 EMPLOYEE_UNEMPLOYMENT_RATE = Decimal("1.6")
 EMPLOYER_UNEMPLOYMENT_RATE = Decimal("0.8")
 VALID_FUNDED_PENSION_RATES = {0, 2, 4, 6}
+VALID_WORK_PERIODS = {"budget_month", "previous_month"}
 KNOWN_TAX_RULES_YEAR = 2026
 
 
@@ -75,6 +76,25 @@ def statutory_estonian_holidays(year: int) -> set[date]:
         date(year, 12, 25),
         date(year, 12, 26),
     }
+
+
+def income_working_time_month(budget_month: str, work_period: str) -> str:
+    """Return the calendar month whose hours earn an income payment."""
+    try:
+        year, month = (int(part) for part in budget_month.split("-"))
+        date(year, month, 1)
+    except (AttributeError, TypeError, ValueError) as err:
+        raise EstonianPayrollError("Month must use YYYY-MM format") from err
+    if work_period not in VALID_WORK_PERIODS:
+        raise EstonianPayrollError(
+            "Income work period must be the budget month or previous month"
+        )
+    if work_period == "budget_month":
+        return budget_month
+    previous_year, previous_month = (
+        (year - 1, 12) if month == 1 else (year, month - 1)
+    )
+    return f"{previous_year:04d}-{previous_month:02d}"
 
 
 def _previous_working_day(value: date, holidays: set[date]) -> date:
@@ -141,12 +161,26 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
     tax_free_income = _decimal(
         raw.get("tax_free_income", DEFAULT_TAX_FREE_INCOME), "Tax-free income"
     )
+    work_period = str(raw.get("work_period", "budget_month"))
+    if work_period not in VALID_WORK_PERIODS:
+        raise EstonianPayrollError(
+            "Income work period must be the budget month or previous month"
+        )
     try:
         pension_rate = int(raw.get("funded_pension_rate", 0))
     except (TypeError, ValueError) as err:
         raise EstonianPayrollError("Funded pension rate must be 0, 2, 4, or 6") from err
     if pension_rate not in VALID_FUNDED_PENSION_RATES:
         raise EstonianPayrollError("Funded pension rate must be 0, 2, 4, or 6")
+    funded_pension_joined = bool(
+        raw.get("funded_pension_joined", pension_rate > 0)
+    )
+    if not funded_pension_joined:
+        pension_rate = 0
+    elif pension_rate == 0:
+        raise EstonianPayrollError(
+            "Funded pension rate must be 2, 4, or 6 when joined"
+        )
     try:
         working_days = int(raw.get("working_days", 0) or 0)
     except (TypeError, ValueError) as err:
@@ -158,8 +192,10 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
         "mode": PAYROLL_MODE,
         "hourly_gross": _money(hourly_gross),
         "working_hours_mode": working_hours_mode,
+        "work_period": work_period,
         "working_hours": _money(working_hours),
         "working_days": working_days,
+        "working_time_month": str(raw.get("working_time_month", "")),
         "calendar_source": str(
             raw.get(
                 "calendar_source",
@@ -171,6 +207,7 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
         "tax_free_income": _money(tax_free_income),
         "employee_unemployment": bool(raw.get("employee_unemployment", True)),
         "employer_unemployment": bool(raw.get("employer_unemployment", True)),
+        "funded_pension_joined": funded_pension_joined,
         "funded_pension_rate": pension_rate,
     }
     for key in (

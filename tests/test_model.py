@@ -141,6 +141,35 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(result["social_tax_amount"], 739.2)
         self.assertEqual(result["employer_unemployment_amount"], 17.92)
         self.assertEqual(result["employer_cost"], 2997.12)
+        self.assertFalse(result["funded_pension_joined"])
+        self.assertEqual(result["funded_pension_rate"], 0)
+
+    def test_unchecked_funded_pension_always_forces_zero_percent(self) -> None:
+        result = payroll.calculate_estonian_payroll(
+            {
+                "mode": "estonian_hourly",
+                "hourly_gross": 14,
+                "working_hours_mode": "manual",
+                "working_hours": 160,
+                "funded_pension_joined": False,
+                "funded_pension_rate": 6,
+            },
+            payment_year=2026,
+        )
+
+        self.assertFalse(result["funded_pension_joined"])
+        self.assertEqual(result["funded_pension_rate"], 0)
+        self.assertEqual(result["funded_pension_amount"], 0)
+
+    def test_previous_income_work_period_crosses_year_boundary(self) -> None:
+        self.assertEqual(
+            payroll.income_working_time_month("2026-09", "previous_month"),
+            "2026-08",
+        )
+        self.assertEqual(
+            payroll.income_working_time_month("2027-01", "previous_month"),
+            "2026-12",
+        )
 
     def test_dynamic_savings_preserves_plan_inside_rag_band(self) -> None:
         month = model.make_month("2026-09")
@@ -508,6 +537,41 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(september["income_calculation"]["working_hours"], 176)
         self.assertEqual(august["amount"], 1873.24)
         self.assertEqual(september["amount"], 2045.17)
+
+    async def test_hourly_income_can_use_previous_months_working_hours(self) -> None:
+        class FakeCalendar:
+            async def async_month(self, month_key):
+                self.requested_month = month_key
+                return {
+                    "working_days": 20,
+                    "working_hours": 160,
+                    "calendar_source": "test",
+                }
+
+        fake_calendar = FakeCalendar()
+        self.manager._estonian_calendar = fake_calendar
+        created = await self.manager.async_upsert_item(
+            "2026-09",
+            {
+                "name": "Salary paid afterward",
+                "kind": "income",
+                "amount": 0,
+                "recurrence": "single",
+                "income_calculation": {
+                    "mode": "estonian_hourly",
+                    "hourly_gross": 14,
+                    "working_hours_mode": "automatic",
+                    "work_period": "previous_month",
+                    "funded_pension_joined": False,
+                    "funded_pension_rate": 6,
+                },
+            },
+        )
+
+        self.assertEqual(fake_calendar.requested_month, "2026-08")
+        self.assertEqual(created["income_calculation"]["working_time_month"], "2026-08")
+        self.assertEqual(created["income_calculation"]["funded_pension_rate"], 0)
+        self.assertEqual(created["amount"], 1873.24)
 
     async def test_copied_hourly_income_uses_target_month_working_hours(self) -> None:
         class FakeCalendar:

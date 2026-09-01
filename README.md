@@ -15,7 +15,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Optional inline plan-table editing for amounts. New cells create one-time items with default properties and are highlighted as requiring review in the month view until their details are saved.
 - Detailed month view with expected income, expenditures, manual account balance, remaining forecast, and automatic EUR/day calculation.
 - The **Budget** sidebar opens the active budget cycle: with the default cycle end on the 2nd, the previous month remains active through the 2nd and the new month opens on the 3rd.
-- Advanced Estonian hourly income converts hourly gross pay and that month's working-time fund into estimated net income, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
+- Advanced Estonian hourly income converts hourly gross pay into estimated net income using either the budget month's or previous month's working-time fund, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
 - Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
 - Add, edit, and delete income, expenditures, and savings.
 - One-time, monthly, and yearly items.
@@ -62,7 +62,7 @@ When an automatic savings item is marked paid/transferred, its calculated amount
 
 ### Estonian hourly income
 
-For an income item, enable **Calculate monthly net income from an hourly gross rate**. Automatic working hours use an eight-hour Monday–Friday schedule, remove Estonian public holidays, and apply the three-hour reductions before New Year's Day, Independence Day, Victory Day, and Christmas Eve. Recurring income is recalculated separately for every month; for example, August 2026 has 20 working days and 160 working hours.
+For an income item, enable **Calculate monthly net income from an hourly gross rate**. Choose whether the working hours were earned in the same calendar month as the budget or in the previous month—for example, a salary received in September can use August's working-time fund. Automatic working hours use an eight-hour Monday–Friday schedule, remove Estonian public holidays, and apply the three-hour reductions before New Year's Day, Independence Day, Victory Day, and Christmas Eve. Recurring income is recalculated separately for every month; for example, August 2026 has 20 working days and 160 working hours. When funded-pension membership is unchecked, the contribution is always calculated at 0%.
 
 Holiday dates are requested on demand from the public [Nager.Date API](https://date.nager.at/Api). Only the year and Estonia country code are sent. No item names, rates, balances, or other budget data leave Home Assistant. If the API is unavailable, Budget Manager calculates the statutory Estonian holidays locally.
 

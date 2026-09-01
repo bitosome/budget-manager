@@ -31,7 +31,10 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         return
     await panel_custom.async_register_panel(
         hass,
-        webcomponent_name=PANEL_COMPONENT,
+        # A versioned element name prevents an already-open Home Assistant
+        # frontend from keeping the previous custom-element class after an
+        # integration upgrade. Custom elements cannot be redefined in place.
+        webcomponent_name=f"{PANEL_COMPONENT}-{panel_version}",
         frontend_url_path=PANEL_URL,
         module_url=f"{STATIC_URL}/budget-manager-panel.js?v={panel_version}",
         sidebar_title=PANEL_TITLE,

@@ -16,6 +16,7 @@ from .estonian_calendar import EstonianWorkingHoursProvider
 from .estonian_payroll import (
     EstonianPayrollError,
     calculate_estonian_payroll,
+    income_working_time_month,
     normalize_income_calculation,
 )
 from .const import (
@@ -95,7 +96,15 @@ class BudgetManager:
             migrated_items = []
             for item in month.get("items", []):
                 item.setdefault("needs_review", False)
-                item.setdefault("income_calculation", None)
+                try:
+                    item["income_calculation"] = normalize_income_calculation(
+                        item.get("income_calculation"),
+                        is_income=item.get("kind") == "income",
+                    )
+                except EstonianPayrollError:
+                    # Preserve unexpected legacy data for export/recovery rather
+                    # than silently discarding a user's calculation settings.
+                    item.setdefault("income_calculation", None)
                 if (
                     item.get("kind") == "expense"
                     and item.get("name", "").strip().casefold() == "savings"
@@ -108,7 +117,7 @@ class BudgetManager:
                     item.setdefault("dynamic", False)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 6
+        self._data["schema_version"] = 7
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -453,8 +462,14 @@ class BudgetManager:
         prepared = {**raw, "income_calculation": config}
         if config is None:
             return prepared
+        working_time_month = income_working_time_month(
+            month_key, config["work_period"]
+        )
+        config["working_time_month"] = working_time_month
         if config["working_hours_mode"] == "automatic":
-            working_time = await self._estonian_calendar.async_month(month_key)
+            working_time = await self._estonian_calendar.async_month(
+                working_time_month
+            )
             config.update(
                 {
                     "working_hours": working_time["working_hours"],

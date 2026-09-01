@@ -200,6 +200,14 @@ class BudgetManagerPanel extends HTMLElement {
     return `${MONTH_NAMES[month - 1]} ${year}`;
   }
 
+  _incomeWorkingMonth(budgetMonth, workPeriod) {
+    if (workPeriod !== "previous_month") return budgetMonth;
+    const [year, month] = budgetMonth.split("-").map(Number);
+    const previousYear = month === 1 ? year - 1 : year;
+    const previousMonth = month === 1 ? 12 : month - 1;
+    return `${previousYear}-${String(previousMonth).padStart(2, "0")}`;
+  }
+
   _render() {
     if (!this.shadowRoot) return;
     const body = this._error
@@ -436,7 +444,7 @@ class BudgetManagerPanel extends HTMLElement {
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(item.recurrence_end)}` : " · one-time"}
-          ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h gross` : ""}
+          ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
@@ -706,6 +714,8 @@ class BudgetManagerPanel extends HTMLElement {
     const incomeCalculation = item?.income_calculation || null;
     const automaticWorkingHours = (incomeCalculation?.working_hours_mode || "automatic") === "automatic";
     const fundedPensionRate = Number(incomeCalculation?.funded_pension_rate || 0);
+    const fundedPensionIsJoined = incomeCalculation?.funded_pension_joined ?? (fundedPensionRate > 0);
+    const workPeriod = incomeCalculation?.work_period || "budget_month";
     const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
     const fields = `
       ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
@@ -718,12 +728,13 @@ class BudgetManagerPanel extends HTMLElement {
         <legend>Estonian hourly income</legend>
         <label class="check"><input type="checkbox" name="estonian_hourly" id="estonian-hourly" ${incomeCalculation ? "checked" : ""}><span>Calculate monthly net income from an hourly gross rate</span></label>
         <div id="estonian-payroll-fields" hidden>
+          <label><span>Working hours are earned in</span><select name="work_period" id="income-work-period"><option value="budget_month" ${workPeriod === "budget_month" ? "selected" : ""}>The same month as this budget</option><option value="previous_month" ${workPeriod === "previous_month" ? "selected" : ""}>The previous month (salary paid afterward)</option></select></label>
           <div class="two-col">
             ${this._field("Hourly gross, EUR", "hourly_gross", incomeCalculation?.hourly_gross ?? "", "number", "min=0.01 step=0.01")}
             ${this._field("Working hours", "working_hours", incomeCalculation?.working_hours ?? "", "number", "min=0.01 step=0.01")}
           </div>
           <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${automaticWorkingHours ? "checked" : ""}><span>Use Estonia's standard monthly working hours automatically</span></label>
-          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
+          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(this._month, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
           <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${incomeCalculation?.apply_social_tax_minimum !== false ? "checked" : ""}><span>Apply the social-tax minimum monthly base (€886)</span></label>
           <div class="tax-free-setting">
             <label class="check"><input type="checkbox" name="apply_tax_free_income" ${incomeCalculation?.apply_tax_free_income !== false ? "checked" : ""}><span>Apply tax-free income</span></label>
@@ -731,7 +742,7 @@ class BudgetManagerPanel extends HTMLElement {
           </div>
           <label class="check"><input type="checkbox" name="employee_unemployment" ${incomeCalculation?.employee_unemployment !== false ? "checked" : ""}><span>Employee unemployment insurance (1.6%)</span></label>
           <label class="check"><input type="checkbox" name="employer_unemployment" ${incomeCalculation?.employer_unemployment !== false ? "checked" : ""}><span>Employer unemployment insurance (0.8%)</span></label>
-          <label class="check"><input type="checkbox" name="funded_pension_joined" id="funded-pension-joined" ${fundedPensionRate > 0 ? "checked" : ""}><span>Joined the funded pension</span></label>
+          <label class="check"><input type="checkbox" name="funded_pension_joined" id="funded-pension-joined" ${fundedPensionIsJoined ? "checked" : ""}><span>Joined the funded pension</span></label>
           <div class="pension-rates" role="radiogroup" aria-label="Funded pension contribution rate">
             ${[0, 2, 4, 6].map((rate) => `<label><input type="radio" name="funded_pension_rate" value="${rate}" ${rate === fundedPensionRate ? "checked" : ""}><span>${rate}%</span></label>`).join("")}
           </div>
@@ -776,14 +787,17 @@ class BudgetManagerPanel extends HTMLElement {
             mode: "estonian_hourly",
             hourly_gross: hourlyGross,
             working_hours_mode: form.has("automatic_working_hours") ? "automatic" : "manual",
+            work_period: form.get("work_period"),
             working_hours: workingHours,
             working_days: Number(modal.root.querySelector("#working-hours-status").dataset.workingDays || 0),
+            working_time_month: modal.root.querySelector("#working-hours-status").dataset.workingTimeMonth || this._incomeWorkingMonth(this._month, form.get("work_period")),
             calendar_source: modal.root.querySelector("#working-hours-status").dataset.calendarSource || (form.has("automatic_working_hours") ? "pending" : "manual"),
             apply_social_tax_minimum: form.has("apply_social_tax_minimum"),
             apply_tax_free_income: form.has("apply_tax_free_income"),
             tax_free_income: Number(form.get("tax_free_income")),
             employee_unemployment: form.has("employee_unemployment"),
             employer_unemployment: form.has("employer_unemployment"),
+            funded_pension_joined: form.has("funded_pension_joined"),
             funded_pension_rate: form.has("funded_pension_joined") ? Number(form.get("funded_pension_rate")) : 0,
           } : null,
           dynamic: form.has("dynamic"),
@@ -805,6 +819,7 @@ class BudgetManagerPanel extends HTMLElement {
     const estonianHourly = modal.root.querySelector("#estonian-hourly");
     const payrollFields = modal.root.querySelector("#estonian-payroll-fields");
     const automaticHours = modal.root.querySelector("#automatic-working-hours");
+    const workPeriodSelect = modal.root.querySelector("#income-work-period");
     const hourlyGrossInput = modal.root.querySelector('[name="hourly_gross"]');
     const workingHoursInput = modal.root.querySelector('[name="working_hours"]');
     const workingHoursStatus = modal.root.querySelector("#working-hours-status");
@@ -813,6 +828,7 @@ class BudgetManagerPanel extends HTMLElement {
     const payrollPreview = modal.root.querySelector("#payroll-preview");
     workingHoursStatus.dataset.workingDays = String(incomeCalculation?.working_days || 0);
     workingHoursStatus.dataset.calendarSource = incomeCalculation?.calendar_source || (automaticWorkingHours ? "pending" : "manual");
+    workingHoursStatus.dataset.workingTimeMonth = incomeCalculation?.working_time_month || this._incomeWorkingMonth(this._month, workPeriod);
     const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
     const updatePayrollPreview = () => {
       if (kindSelect.value !== "income" || !estonianHourly.checked) return;
@@ -853,12 +869,14 @@ class BudgetManagerPanel extends HTMLElement {
       refreshWorkingHours.disabled = true;
       workingHoursStatus.textContent = "Loading Estonia working hours…";
       try {
-        const result = await this._hass.callWS({ type: "budget_manager/estonian_working_hours", month: this._month });
+        const workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
+        const result = await this._hass.callWS({ type: "budget_manager/estonian_working_hours", month: workingTimeMonth });
         workingHoursInput.value = Number(result.working_hours).toFixed(2);
         workingHoursStatus.dataset.workingDays = String(result.working_days);
         workingHoursStatus.dataset.calendarSource = result.calendar_source;
+        workingHoursStatus.dataset.workingTimeMonth = workingTimeMonth;
         const source = result.calendar_source === "nager_date" ? "Nager.Date" : "statutory offline fallback";
-        workingHoursStatus.textContent = `${result.working_days} working days · ${result.working_hours} hours · ${source}`;
+        workingHoursStatus.textContent = `${this._monthLabel(workingTimeMonth)} · ${result.working_days} working days · ${result.working_hours} hours · ${source}`;
         updatePayrollPreview();
       } catch (err) {
         workingHoursStatus.textContent = "Working hours could not be refreshed; the server will use its statutory fallback when saving.";
@@ -886,10 +904,17 @@ class BudgetManagerPanel extends HTMLElement {
       if (automaticHours.checked) loadWorkingHours();
       else workingHoursStatus.textContent = "Manual working hours";
     };
+    workPeriodSelect.onchange = () => {
+      workingHoursStatus.dataset.workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
+      if (automaticHours.checked) loadWorkingHours();
+      else workingHoursStatus.textContent = `${this._monthLabel(workingHoursStatus.dataset.workingTimeMonth)} · manual working hours`;
+    };
     fundedPensionJoined.onchange = () => {
       const selected = modal.root.querySelector('[name="funded_pension_rate"]:checked');
       if (fundedPensionJoined.checked && Number(selected?.value || 0) === 0) {
         modal.root.querySelector('[name="funded_pension_rate"][value="2"]').checked = true;
+      } else if (!fundedPensionJoined.checked) {
+        modal.root.querySelector('[name="funded_pension_rate"][value="0"]').checked = true;
       }
       updatePayrollControls();
     };
@@ -977,4 +1002,8 @@ class BudgetManagerPanel extends HTMLElement {
   }
 }
 
-customElements.define("budget-manager-panel", BudgetManagerPanel);
+const PANEL_MODULE_VERSION = new URL(import.meta.url).searchParams.get("v") || "dev";
+const PANEL_ELEMENT_NAME = `budget-manager-panel-${PANEL_MODULE_VERSION.toLowerCase().replace(/[^a-z0-9._-]/g, "-")}`;
+if (!customElements.get(PANEL_ELEMENT_NAME)) {
+  customElements.define(PANEL_ELEMENT_NAME, BudgetManagerPanel);
+}

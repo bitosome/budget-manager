@@ -133,7 +133,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
