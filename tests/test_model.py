@@ -728,6 +728,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adjusted_salary["amount"], baseline_salary)
         self.assertEqual(len(benefits), 1)
         self.assertEqual(benefits[0]["amount"], 124.8)
+        self.assertEqual(benefits[0]["name"], "Tervisekassa care benefit")
 
         weekday = await self.manager.async_upsert_care_leave_period(
             "2026-09",

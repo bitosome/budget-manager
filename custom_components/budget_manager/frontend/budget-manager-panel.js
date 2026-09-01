@@ -1,8 +1,3 @@
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-
 class BudgetManagerPanel extends HTMLElement {
   constructor() {
     super();
@@ -26,10 +21,22 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   set hass(value) {
+    const previousLocale = this._hass ? JSON.stringify([
+      this._hass.locale?.language, this._hass.locale?.date_format,
+      this._hass.locale?.time_format, this._hass.locale?.time_zone,
+      this._hass.config?.time_zone,
+    ]) : null;
     this._hass = value;
     if (!this._initialized && value) {
+      this._year = this._currentDateParts().year;
       this._initialized = true;
       this._load();
+    } else if (value && previousLocale !== JSON.stringify([
+      value.locale?.language, value.locale?.date_format,
+      value.locale?.time_format, value.locale?.time_zone,
+      value.config?.time_zone,
+    ])) {
+      this._render();
     }
   }
 
@@ -186,6 +193,77 @@ class BudgetManagerPanel extends HTMLElement {
     }).format(Number(value || 0));
   }
 
+  _localeLanguage() {
+    return this._hass?.locale?.language
+      || this._hass?.language
+      || this._state?.settings?.locale
+      || window.navigator?.language
+      || "en-GB";
+  }
+
+  _resolvedTimeZone() {
+    if (this._hass?.locale?.time_zone === "local") {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    }
+    return this._hass?.config?.time_zone
+      || Intl.DateTimeFormat().resolvedOptions().timeZone
+      || "UTC";
+  }
+
+  _currentDateParts() {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      timeZone: this._resolvedTimeZone(),
+    }).formatToParts(new Date());
+    const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+    return { year: value("year"), month: value("month"), day: value("day") };
+  }
+
+  _dateOnly(value) {
+    const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12));
+  }
+
+  _formatDate(value) {
+    const date = this._dateOnly(value);
+    if (!date) return String(value || "");
+    const locale = this._hass?.locale || {};
+    const language = locale.date_format === "system" ? undefined : this._localeLanguage();
+    const formatter = new Intl.DateTimeFormat(language, {
+      year: "numeric", month: "numeric", day: "numeric", timeZone: "UTC",
+    });
+    if (!["DMY", "MDY", "YMD"].includes(locale.date_format)) return formatter.format(date);
+    const parts = formatter.formatToParts(date);
+    const literal = parts.find((part) => part.type === "literal")?.value || "/";
+    const values = Object.fromEntries(parts.filter((part) => ["day", "month", "year"].includes(part.type)).map((part) => [part.type, part.value]));
+    const order = { DMY: ["day", "month", "year"], MDY: ["month", "day", "year"], YMD: ["year", "month", "day"] }[locale.date_format];
+    return order.map((part) => values[part]).join(literal);
+  }
+
+  _formatDateRange(start, end) {
+    if (!start) return "";
+    if (!end || start === end) return this._formatDate(start);
+    return `${this._formatDate(start)} – ${this._formatDate(end)}`;
+  }
+
+  _formatDateTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value || "");
+    const locale = this._hass?.locale || {};
+    const hourCycle = locale.time_format === "12" ? "h12" : locale.time_format === "24" ? "h23" : undefined;
+    const timeZone = this._resolvedTimeZone();
+    const dateParts = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric", month: "2-digit", day: "2-digit", timeZone,
+    }).formatToParts(date);
+    const part = (type) => dateParts.find((entry) => entry.type === type)?.value || "";
+    const localDate = `${part("year")}-${part("month")}-${part("day")}`;
+    const time = new Intl.DateTimeFormat(locale.time_format === "system" ? undefined : this._localeLanguage(), {
+      hour: "numeric", minute: "2-digit", hourCycle, timeZone,
+    }).format(date);
+    return `${this._formatDate(localDate)} ${time}`;
+  }
+
   _esc(value) {
     return String(value ?? "")
       .replaceAll("&", "&amp;")
@@ -197,7 +275,16 @@ class BudgetManagerPanel extends HTMLElement {
 
   _monthLabel(key) {
     const [year, month] = key.split("-").map(Number);
-    return `${MONTH_NAMES[month - 1]} ${year}`;
+    return new Intl.DateTimeFormat(this._localeLanguage(), {
+      month: "long", year: "numeric", timeZone: "UTC",
+    }).format(new Date(Date.UTC(year, month - 1, 1, 12)));
+  }
+
+  _monthName(key, width = "long") {
+    const [year, month] = key.split("-").map(Number);
+    return new Intl.DateTimeFormat(this._localeLanguage(), {
+      month: width, timeZone: "UTC",
+    }).format(new Date(Date.UTC(year, month - 1, 1, 12)));
   }
 
   _incomeWorkingMonth(budgetMonth, workPeriod) {
@@ -278,15 +365,14 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _renderMonthCard(month) {
-    const number = Number(month.month.slice(5));
     if (!month.exists) {
       return `<button class="month-card missing" data-action="create-specific-month" data-month="${month.month}">
-        <span class="month-name">${MONTH_NAMES[number - 1]}</span>
+        <span class="month-name">${this._esc(this._monthName(month.month))}</span>
         <span class="plus">＋</span><small>Create month</small>
       </button>`;
     }
     return `<button class="month-card" data-action="open-month" data-month="${month.month}">
-      <div class="month-card-title"><span class="month-name">${MONTH_NAMES[number - 1]}</span><span>→</span></div>
+      <div class="month-card-title"><span class="month-name">${this._esc(this._monthName(month.month))}</span><span>→</span></div>
       <dl>
         <div><dt>Income</dt><dd>${this._money(month.expected_income)}</dd></div>
         <div><dt>Expenses</dt><dd>${this._money(month.unpaid_expenses)}</dd></div>
@@ -319,8 +405,12 @@ class BudgetManagerPanel extends HTMLElement {
       for (const item of month?.items || []) {
         if (item.expense_type === "child_care_leave") continue;
         if (!this._itemHasMonthlyValue(item) && !this._matrixEditMode) continue;
-        const key = `${item.kind}:${item.name}`;
-        if (!rows.has(key)) rows.set(key, { name: item.name, kind: item.kind, months: {} });
+        const generatedPeriod = item.generated_type === "tervisekassa_care_benefit"
+          ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
+          : "";
+        const rowName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
+        const key = `${item.kind}:${rowName}`;
+        if (!rows.has(key)) rows.set(key, { name: rowName, kind: item.kind, months: {} });
         rows.get(key).months[monthKey] = item;
       }
     }
@@ -350,7 +440,7 @@ class BudgetManagerPanel extends HTMLElement {
             <colgroup><col class="item-column">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
               <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
-              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${MONTH_NAMES[Number(key.slice(5)) - 1].slice(0, 3)}</th>`).join("")}</tr>
+              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${this._esc(this._monthName(key, "short"))}</th>`).join("")}</tr>
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
@@ -452,17 +542,21 @@ class BudgetManagerPanel extends HTMLElement {
     const actionLabel = kind === "income" ? (complete ? "Received" : "Mark received") : (complete ? "Paid" : "Mark paid");
     const amount = item.effective_amount ?? item.amount;
     const adjusted = kind === "savings" && item.dynamic && Number(amount) !== Number(item.amount);
+    const generatedPeriod = item.generated_type === "tervisekassa_care_benefit"
+      ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
+      : "";
+    const displayName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(item.name)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
-          ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(item.recurrence_end)}` : " · one-time"}
+          ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(this._formatDate(item.recurrence_end))}` : " · one-time"}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
-          ${item.generated_type === "tervisekassa_care_benefit" ? ` · Tervisekassa approximation for ${this._esc(item.generated?.period_start || "")}–${this._esc(item.generated?.period_end || "")}` : ""}
+          ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
           ${item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
@@ -630,7 +724,8 @@ class BudgetManagerPanel extends HTMLElement {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `budget-manager-${new Date().toISOString().slice(0, 10)}.json`;
+      const today = this._currentDateParts();
+      link.download = `budget-manager-${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}.json`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -649,7 +744,7 @@ class BudgetManagerPanel extends HTMLElement {
       await this._hass.callWS({ type: "budget_manager/import_data", document });
       closeModal();
       this._month = null;
-      this._year = new Date().getFullYear();
+      this._year = this._currentDateParts().year;
       this._defaultViewApplied = false;
       this._currentMonthRequested = true;
       await this._load(this._year);
@@ -695,7 +790,7 @@ class BudgetManagerPanel extends HTMLElement {
     });
   }
 
-  _openCreateMonth(target = `${this._year}-${String(new Date().getMonth() + 1).padStart(2, "0")}`) {
+  _openCreateMonth(target = `${this._year}-${String(this._currentDateParts().month).padStart(2, "0")}`) {
     const sources = this._state.available_months || Object.keys(this._state.months).sort();
     const fields = `${this._field("Target month", "target", target, "month", "required")}
       <label><span>Copy from</span><select name="source"><option value="">Blank month</option>${sources.map((key) => `<option value="${key}">${this._monthLabel(key)}</option>`).join("")}</select></label>
@@ -1059,7 +1154,7 @@ class BudgetManagerPanel extends HTMLElement {
     const basisMode = care.benefit_basis_mode || "estimated_hourly";
     const periodRows = periods.length ? periods.map((period) => {
       const calculation = period.calculation || {};
-      const dateLabel = period.start === period.end ? period.start : `${period.start} – ${period.end}`;
+      const dateLabel = this._formatDateRange(period.start, period.end);
       return `<article class="care-period" data-period-id="${period.id}">
         <div><strong>${this._esc(dateLabel)}</strong><span>${this._esc(calculation.calendar_days || 0)} calendar days · ${this._esc(calculation.missed_working_hours || 0)} missed work hours</span><span>Estimated Tervisekassa net benefit ${this._money(calculation.estimated_net_benefit || 0)}</span></div>
         <div class="care-period-actions"><button type="button" class="quiet edit-care-period" data-period-id="${period.id}">Edit</button><button type="button" class="danger-button delete-care-period" data-period-id="${period.id}">Remove</button></div>

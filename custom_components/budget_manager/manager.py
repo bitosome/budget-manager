@@ -790,15 +790,10 @@ class BudgetManager:
                     existing_key = (care_item["id"], period["id"])
                     existing = generated_existing.get(existing_key, {})
                     result = period["calculation"]
-                    date_label = (
-                        period["start"]
-                        if period["start"] == period["end"]
-                        else f"{period['start']}–{period['end']}"
-                    )
                     generated_item = normalize_item(
                         {
                             "id": existing.get("id") or new_id(),
-                            "name": f"Tervisekassa care benefit · {date_label}",
+                            "name": "Tervisekassa care benefit",
                             "kind": "income",
                             "amount": result["estimated_net_benefit"],
                             "due_day": existing.get("due_day"),

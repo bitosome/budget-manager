@@ -14,6 +14,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - A visible toggle in the plan table's `Item` header pins or unpins the first column per device; mobile defaults to unpinned for easier horizontal scrolling.
 - Optional inline plan-table editing for amounts. New cells create one-time items with default properties and are highlighted as requiring review in the month view until their details are saved.
 - Detailed month view with expected income, expenditures, manual account balance, remaining forecast, and automatic EUR/day calculation.
+- Dates, month names, date ranges, and future timestamp displays follow the Home Assistant user's language, date-order, time-format, and timezone preferences; ISO values remain internal to storage and APIs.
 - The **Budget** sidebar opens the active budget cycle: with the default cycle end on the 2nd, the previous month remains active through the 2nd and the new month opens on the 3rd.
 - Advanced Estonian hourly income converts hourly gross pay into estimated net income using either the budget month's or previous month's working-time fund, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
 - Estonian child-care sick leave can be linked to an automatic hourly salary. Calendar periods reduce only scheduled work hours, while each period creates a separate estimated Tervisekassa income in the salary-payment month.
@@ -153,6 +154,7 @@ The pure calculation and period-copy model is covered by standard-library unit t
 ```bash
 python3 -m unittest discover -s tests -v
 node --check custom_components/budget_manager/frontend/budget-manager-panel.js
+node tests/test_frontend_locale.mjs
 python3 -m compileall -q custom_components tests
 ```
 
