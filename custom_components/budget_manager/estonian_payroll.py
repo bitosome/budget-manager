@@ -158,6 +158,13 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
     working_hours = _decimal(raw.get("working_hours", 0), "Working hours")
     if working_hours_mode == "manual" and working_hours == 0:
         raise EstonianPayrollError("Manual working hours must be greater than zero")
+    standard_working_hours = _decimal(
+        raw.get("standard_working_hours", working_hours),
+        "Standard working hours",
+    )
+    care_leave_hours = _decimal(
+        raw.get("care_leave_hours", 0), "Care-leave hours"
+    )
     tax_free_income = _decimal(
         raw.get("tax_free_income", DEFAULT_TAX_FREE_INCOME), "Tax-free income"
     )
@@ -183,10 +190,17 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
         )
     try:
         working_days = int(raw.get("working_days", 0) or 0)
+        care_leave_period_count = int(
+            raw.get("care_leave_period_count", 0) or 0
+        )
     except (TypeError, ValueError) as err:
-        raise EstonianPayrollError("Working days must be a number") from err
-    if working_days < 0:
-        raise EstonianPayrollError("Working days must be non-negative")
+        raise EstonianPayrollError(
+            "Working days and care-leave period count must be numbers"
+        ) from err
+    if working_days < 0 or care_leave_period_count < 0:
+        raise EstonianPayrollError(
+            "Working days and care-leave period count must be non-negative"
+        )
 
     normalized = {
         "mode": PAYROLL_MODE,
@@ -194,6 +208,9 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
         "working_hours_mode": working_hours_mode,
         "work_period": work_period,
         "working_hours": _money(working_hours),
+        "standard_working_hours": _money(standard_working_hours),
+        "care_leave_hours": _money(care_leave_hours),
+        "care_leave_period_count": care_leave_period_count,
         "working_days": working_days,
         "working_time_month": str(raw.get("working_time_month", "")),
         "calendar_source": str(
@@ -222,6 +239,8 @@ def normalize_income_calculation(raw: Any, *, is_income: bool) -> dict[str, Any]
         "social_tax_amount",
         "employer_unemployment_amount",
         "employer_cost",
+        "care_leave_original_net_income",
+        "care_leave_net_salary_reduction",
     ):
         if key in raw:
             normalized[key] = raw[key]

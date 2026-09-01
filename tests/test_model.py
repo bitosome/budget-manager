@@ -24,6 +24,9 @@ model = importlib.import_module("custom_components.budget_manager.model")
 payroll = importlib.import_module(
     "custom_components.budget_manager.estonian_payroll"
 )
+care_leave = importlib.import_module(
+    "custom_components.budget_manager.estonian_care_leave"
+)
 
 
 class _FakeStore:
@@ -170,6 +173,60 @@ class BudgetModelTests(unittest.TestCase):
             payroll.income_working_time_month("2027-01", "previous_month"),
             "2026-12",
         )
+
+    def test_weekend_care_leave_adds_benefit_without_salary_hours(self) -> None:
+        result = care_leave.calculate_care_period(
+            {"id": "weekend", "start": "2026-09-05", "end": "2026-09-06"},
+            hourly_gross=14,
+            previous_year_working_hours=0,
+            benefit_basis_mode="actual_previous_year_income",
+            actual_previous_year_income=36500,
+            public_holidays=[],
+            shortened_workdays=[],
+            benefit_year=2026,
+        )
+
+        self.assertEqual(result["calendar_days"], 2)
+        self.assertEqual(result["missed_working_hours"], 0)
+        self.assertEqual(result["estimated_net_benefit"], 124.8)
+        self.assertEqual(result["benefit_basis_mode"], "actual_previous_year_income")
+
+    def test_hourly_care_benefit_basis_is_clearly_an_estimate(self) -> None:
+        result = care_leave.calculate_care_period(
+            {"id": "weekday", "start": "2026-09-07", "end": "2026-09-07"},
+            hourly_gross=14,
+            previous_year_working_hours=2000,
+            benefit_basis_mode="estimated_hourly",
+            actual_previous_year_income=0,
+            public_holidays=[],
+            shortened_workdays=[],
+            benefit_year=2026,
+        )
+
+        self.assertEqual(result["missed_working_hours"], 8)
+        self.assertEqual(result["estimated_previous_year_gross"], 28000)
+        self.assertTrue(result["estimated"])
+
+    def test_care_leave_periods_must_not_overlap(self) -> None:
+        with self.assertRaisesRegex(model.BudgetValidationError, "cannot overlap"):
+            model.normalize_item(
+                {
+                    "name": "Child-care sick leave",
+                    "kind": "expense",
+                    "amount": 0,
+                    "expense_type": "child_care_leave",
+                    "care_leave": {
+                        "linked_income_item_id": "salary",
+                        "work_month": "2026-09",
+                        "income_month": "2026-10",
+                        "periods": [
+                            {"id": "one", "start": "2026-09-05", "end": "2026-09-07"},
+                            {"id": "two", "start": "2026-09-07", "end": "2026-09-08"},
+                        ],
+                        "benefit_basis_mode": "estimated_hourly",
+                    },
+                }
+            )
 
     def test_dynamic_savings_preserves_plan_inside_rag_band(self) -> None:
         month = model.make_month("2026-09")
@@ -332,6 +389,41 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(copied["items"][0]["status"], "pending")
         self.assertIsNone(copied["items"][0]["paid_at"])
         self.assertNotEqual(copied["items"][0]["id"], item["id"])
+
+    def test_copy_month_skips_event_specific_care_leave_data(self) -> None:
+        source = model.make_month("2026-09")
+        source["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Child-care sick leave",
+                    "kind": "expense",
+                    "amount": 0,
+                    "expense_type": "child_care_leave",
+                    "care_leave": {
+                        "linked_income_item_id": "salary",
+                        "work_month": "2026-09",
+                        "income_month": "2026-10",
+                        "periods": [
+                            {"id": "period", "start": "2026-09-05", "end": "2026-09-06"}
+                        ],
+                        "benefit_basis_mode": "estimated_hourly",
+                    },
+                }
+            ),
+            model.normalize_item(
+                {
+                    "name": "Tervisekassa benefit",
+                    "kind": "income",
+                    "amount": 100,
+                    "generated_type": "tervisekassa_care_benefit",
+                    "generated": {"source_care_item_id": "care", "source_period_id": "period"},
+                }
+            ),
+        ]
+
+        copied = model.copy_month_data(source, "2026-09", "2027-09")
+
+        self.assertEqual(copied["items"], [])
 
     def test_bounded_monthly_recurrence(self) -> None:
         months = model.iter_recurrence_months(
@@ -572,6 +664,109 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["income_calculation"]["working_time_month"], "2026-08")
         self.assertEqual(created["income_calculation"]["funded_pension_rate"], 0)
         self.assertEqual(created["amount"], 1873.24)
+
+    async def test_care_leave_adjusts_following_salary_and_generates_benefit(self) -> None:
+        class FakeCalendar:
+            async def async_month(self, month_key):
+                return {
+                    "month": month_key,
+                    "working_days": 22,
+                    "working_hours": 176,
+                    "public_holidays": [],
+                    "shortened_workdays": [],
+                    "calendar_source": "test",
+                }
+
+        self.manager._estonian_calendar = FakeCalendar()
+        self.manager.data["months"]["2026-10"] = model.make_month("2026-10")
+        salary = await self.manager.async_upsert_item(
+            "2026-10",
+            {
+                "name": "Hourly salary",
+                "kind": "income",
+                "amount": 0,
+                "recurrence": "single",
+                "income_calculation": {
+                    "mode": "estonian_hourly",
+                    "hourly_gross": 14,
+                    "working_hours_mode": "automatic",
+                    "work_period": "previous_month",
+                    "funded_pension_joined": False,
+                    "funded_pension_rate": 0,
+                },
+            },
+        )
+        baseline_salary = salary["amount"]
+        care_item = await self.manager.async_upsert_item(
+            "2026-09",
+            {
+                "name": "Child-care sick leave",
+                "kind": "expense",
+                "amount": 0,
+                "recurrence": "single",
+                "expense_type": "child_care_leave",
+                "care_leave": {
+                    "linked_income_item_id": salary["id"],
+                    "linked_income_name": salary["name"],
+                    "work_month": "2026-09",
+                    "income_month": "2026-10",
+                    "periods": [],
+                    "benefit_basis_mode": "actual_previous_year_income",
+                    "actual_previous_year_income": 36500,
+                },
+            },
+        )
+
+        weekend = await self.manager.async_upsert_care_leave_period(
+            "2026-09",
+            care_item["id"],
+            {"start": "2026-09-05", "end": "2026-09-06"},
+        )
+        october_items = self.manager.data["months"]["2026-10"]["items"]
+        adjusted_salary = next(item for item in october_items if item["id"] == salary["id"])
+        benefits = [item for item in october_items if item.get("generated_type")]
+        self.assertEqual(adjusted_salary["amount"], baseline_salary)
+        self.assertEqual(len(benefits), 1)
+        self.assertEqual(benefits[0]["amount"], 124.8)
+
+        weekday = await self.manager.async_upsert_care_leave_period(
+            "2026-09",
+            care_item["id"],
+            {"start": "2026-09-07", "end": "2026-09-07"},
+        )
+        october_items = self.manager.data["months"]["2026-10"]["items"]
+        adjusted_salary = next(item for item in october_items if item["id"] == salary["id"])
+        benefits = [item for item in october_items if item.get("generated_type")]
+        self.assertLess(adjusted_salary["amount"], baseline_salary)
+        self.assertEqual(adjusted_salary["income_calculation"]["care_leave_hours"], 8)
+        self.assertEqual(len(benefits), 2)
+
+        await self.manager.async_delete_care_leave_period(
+            "2026-09", care_item["id"], weekday["id"]
+        )
+        october_items = self.manager.data["months"]["2026-10"]["items"]
+        restored_salary = next(item for item in october_items if item["id"] == salary["id"])
+        benefits = [item for item in october_items if item.get("generated_type")]
+        self.assertEqual(restored_salary["amount"], baseline_salary)
+        self.assertEqual(len(benefits), 1)
+        self.assertEqual(benefits[0]["generated"]["source_period_id"], weekend["id"])
+
+    async def test_generated_care_benefit_cannot_be_edited_or_deleted_directly(self) -> None:
+        generated = model.normalize_item(
+            {
+                "name": "Tervisekassa care benefit",
+                "kind": "income",
+                "amount": 100,
+                "generated_type": "tervisekassa_care_benefit",
+                "generated": {"source_care_item_id": "care", "source_period_id": "period"},
+            }
+        )
+        self.manager.data["months"]["2026-09"]["items"].append(generated)
+
+        with self.assertRaisesRegex(model.BudgetValidationError, "managed"):
+            await self.manager.async_upsert_item("2026-09", {**generated, "amount": 120})
+        with self.assertRaisesRegex(model.BudgetValidationError, "source care-leave period"):
+            await self.manager.async_delete_item("2026-09", generated["id"])
 
     async def test_copied_hourly_income_uses_target_month_working_hours(self) -> None:
         class FakeCalendar:

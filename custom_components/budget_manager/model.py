@@ -11,6 +11,12 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from .estonian_care_leave import (
+    CARE_LEAVE_TYPE,
+    GENERATED_BENEFIT_TYPE,
+    EstonianCareLeaveError,
+    normalize_care_leave,
+)
 from .estonian_payroll import EstonianPayrollError, normalize_income_calculation
 
 from .const import (
@@ -133,7 +139,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -226,12 +232,38 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
     except EstonianPayrollError as err:
         raise BudgetValidationError(str(err)) from err
 
+    expense_type = (
+        str(raw.get("expense_type") or "standard")
+        if kind == KIND_EXPENSE
+        else "standard"
+    )
+    if expense_type not in {"standard", CARE_LEAVE_TYPE}:
+        raise BudgetValidationError("Unsupported expenditure type")
+    is_care_leave = kind == KIND_EXPENSE and expense_type == CARE_LEAVE_TYPE
+    if is_care_leave and recurrence != RECURRENCE_SINGLE:
+        raise BudgetValidationError("Child-care leave cannot be recurring")
+    try:
+        care_leave = normalize_care_leave(
+            raw.get("care_leave"), enabled=is_care_leave
+        )
+    except EstonianCareLeaveError as err:
+        raise BudgetValidationError(str(err)) from err
+
+    generated_type = (
+        str(raw.get("generated_type") or "") if kind == KIND_INCOME else ""
+    )
+    if generated_type not in {"", GENERATED_BENEFIT_TYPE}:
+        raise BudgetValidationError("Unsupported generated income type")
+    generated = raw.get("generated") if generated_type else None
+    if generated is not None and not isinstance(generated, dict):
+        raise BudgetValidationError("Generated income metadata must be an object")
+
     return {
         "id": existing_id or str(raw.get("id") or new_id()),
         "name": name,
         "kind": kind,
-        "amount": money(raw.get("amount", 0)),
-        "due_day": due_day,
+        "amount": 0.0 if is_care_leave else money(raw.get("amount", 0)),
+        "due_day": None if is_care_leave else due_day,
         "status": status,
         "paid_at": paid_at,
         "category": str(raw.get("category", "")).strip(),
@@ -248,6 +280,10 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         "recurrence_end": recurrence_end,
         "needs_review": bool(raw.get("needs_review", False)),
         "income_calculation": income_calculation,
+        "expense_type": expense_type,
+        "care_leave": care_leave,
+        "generated_type": generated_type,
+        "generated": dict(generated) if isinstance(generated, dict) else None,
         "dynamic": bool(raw.get("dynamic", kind == KIND_SAVINGS))
         if kind == KIND_SAVINGS
         else False,
@@ -270,6 +306,11 @@ def copy_month_data(
     )
     target["items"] = []
     for raw in source_month.get("items", []):
+        if (
+            raw.get("expense_type") == CARE_LEAVE_TYPE
+            or raw.get("generated_type") == GENERATED_BENEFIT_TYPE
+        ):
+            continue
         item = deepcopy(raw)
         item["id"] = new_id()
         item["status"] = STATUS_PENDING
@@ -315,6 +356,11 @@ def iter_recurrence_months(
 def item_is_open(item: dict[str, Any]) -> bool:
     """Return whether an item still contributes to the forecast."""
     return item.get("status", STATUS_PENDING) == STATUS_PENDING
+
+
+def item_is_financial(item: dict[str, Any]) -> bool:
+    """Return whether an item contributes money and completion counts."""
+    return item.get("expense_type") != CARE_LEAVE_TYPE
 
 
 def normalize_thresholds(settings: dict[str, Any] | None = None) -> tuple[float, float]:
@@ -514,22 +560,26 @@ def calculate_month(
     expected_income = sum(
         money(item.get("amount", 0))
         for item in items
-        if item.get("kind") == KIND_INCOME and item_is_open(item)
+        if item.get("kind") == KIND_INCOME
+        and item_is_financial(item)
+        and item_is_open(item)
     )
     unpaid_expenses = sum(
         money(item.get("amount", 0))
         for item in items
-        if item.get("kind") == KIND_EXPENSE and item_is_open(item)
+        if item.get("kind") == KIND_EXPENSE
+        and item_is_financial(item)
+        and item_is_open(item)
     )
     total_income = sum(
         money(item.get("amount", 0))
         for item in items
-        if item.get("kind") == KIND_INCOME
+        if item.get("kind") == KIND_INCOME and item_is_financial(item)
     )
     total_expenses = sum(
         money(item.get("amount", 0))
         for item in items
-        if item.get("kind") == KIND_EXPENSE
+        if item.get("kind") == KIND_EXPENSE and item_is_financial(item)
     )
     account_balance = money(month.get("account_balance", 0))
 
@@ -621,9 +671,12 @@ def calculate_month(
     paid_count = sum(
         1
         for item in items
-        if item.get("status") in (STATUS_PAID, STATUS_RECEIVED)
+        if item_is_financial(item)
+        and item.get("status") in (STATUS_PAID, STATUS_RECEIVED)
     )
-    pending_count = sum(1 for item in items if item_is_open(item))
+    pending_count = sum(
+        1 for item in items if item_is_financial(item) and item_is_open(item)
+    )
 
     return {
         "month": month_key,

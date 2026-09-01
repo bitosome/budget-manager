@@ -41,6 +41,8 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_update_month,
         ws_delete_month,
         ws_upsert_item,
+        ws_upsert_care_leave_period,
+        ws_delete_care_leave_period,
         ws_delete_item,
         ws_set_item_status,
         ws_estonian_working_hours,
@@ -305,6 +307,58 @@ async def ws_upsert_item(
         _error(connection, msg, err)
     else:
         connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/upsert_care_leave_period",
+        vol.Required("month"): str,
+        vol.Required("item_id"): str,
+        vol.Required("period"): dict,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_upsert_care_leave_period(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Create or update one child-care leave calendar period."""
+    try:
+        result = await _manager(hass).async_upsert_care_leave_period(
+            msg["month"], msg["item_id"], msg["period"]
+        )
+    except (BudgetValidationError, TypeError, ValueError) as err:
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/delete_care_leave_period",
+        vol.Required("month"): str,
+        vol.Required("item_id"): str,
+        vol.Required("period_id"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_delete_care_leave_period(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Delete one child-care leave calendar period."""
+    try:
+        await _manager(hass).async_delete_care_leave_period(
+            msg["month"], msg["item_id"], msg["period_id"]
+        )
+    except (BudgetValidationError, TypeError, ValueError) as err:
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"])
 
 
 @websocket_api.websocket_command(

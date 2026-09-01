@@ -5,13 +5,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .estonian_care_leave import (
+    CARE_LEAVE_TYPE,
+    GENERATED_BENEFIT_TYPE,
+    EstonianCareLeaveError,
+    calculate_care_period,
+    normalize_care_period,
+)
 from .estonian_calendar import EstonianWorkingHoursProvider
 from .estonian_payroll import (
     EstonianPayrollError,
@@ -96,6 +103,10 @@ class BudgetManager:
             migrated_items = []
             for item in month.get("items", []):
                 item.setdefault("needs_review", False)
+                item.setdefault("expense_type", "standard")
+                item.setdefault("care_leave", None)
+                item.setdefault("generated_type", "")
+                item.setdefault("generated", None)
                 try:
                     item["income_calculation"] = normalize_income_calculation(
                         item.get("income_calculation"),
@@ -117,7 +128,8 @@ class BudgetManager:
                     item.setdefault("dynamic", False)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 7
+        self._data["schema_version"] = 8
+        await self._async_rebuild_all_care_leave_effects()
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -195,8 +207,14 @@ class BudgetManager:
         """Validate and replace the budget from a portable JSON document."""
         imported = normalize_import_document(document)
         async with self._lock:
+            previous = self._data
             self._data = imported
-            await self._async_commit()
+            try:
+                await self._async_rebuild_all_care_leave_effects()
+                await self._async_commit()
+            except Exception:
+                self._data = previous
+                raise
 
     async def async_update_settings(self, changes: dict[str, Any]) -> None:
         """Update cycle, daily-money, and automatic-savings settings."""
@@ -285,6 +303,7 @@ class BudgetManager:
             else:
                 month = make_month(target, cycle_end_day=cycle_end_day)
             self._data["months"][target] = month
+            await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return self._month_payload(month)
 
@@ -333,6 +352,7 @@ class BudgetManager:
                         source=source,
                         cycle_end_day=cycle_end_day,
                     )
+            await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return calculate_year(
                 self._data, int(target_year), today=self.today()
@@ -361,6 +381,7 @@ class BudgetManager:
         async with self._lock:
             if self._data["months"].pop(month_key, None) is None:
                 raise BudgetValidationError(f"Month {month_key} does not exist")
+            await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
 
     async def async_upsert_item(
@@ -380,6 +401,14 @@ class BudgetManager:
             existing = next(
                 (item for item in month["items"] if item["id"] == raw_id), None
             )
+            if existing and existing.get("generated_type") == GENERATED_BENEFIT_TYPE:
+                raise BudgetValidationError(
+                    "Automatic Tervisekassa income is managed from its care-leave period"
+                )
+            if raw.get("generated_type"):
+                raise BudgetValidationError(
+                    "Generated income cannot be created or edited directly"
+                )
 
             if existing and scope == "future" and existing.get("series_id"):
                 series_id = existing["series_id"]
@@ -403,9 +432,11 @@ class BudgetManager:
                 await self._async_prepare_calculated_income(merged, month_key),
                 existing_id=existing["id"] if existing else None,
             )
+            self._validate_care_leave_item(normalized)
             if existing:
                 index = month["items"].index(existing)
                 month["items"][index] = normalized
+                await self._async_rebuild_all_care_leave_effects()
                 await self._async_commit()
                 return deepcopy(normalized)
 
@@ -440,6 +471,7 @@ class BudgetManager:
                     occurrence["paid_at"] = None
                     target_month["items"].append(occurrence)
                 normalized["series_id"] = series_id
+            await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return deepcopy(normalized)
 
@@ -449,7 +481,12 @@ class BudgetManager:
         return await self._estonian_calendar.async_month(month_key)
 
     async def _async_prepare_calculated_income(
-        self, raw: dict[str, Any], month_key: str
+        self,
+        raw: dict[str, Any],
+        month_key: str,
+        *,
+        care_leave_hours: float = 0,
+        care_leave_period_count: int = 0,
     ) -> dict[str, Any]:
         """Resolve automatic working hours and calculate an income amount."""
         try:
@@ -470,17 +507,54 @@ class BudgetManager:
             working_time = await self._estonian_calendar.async_month(
                 working_time_month
             )
+            standard_working_hours = float(working_time["working_hours"])
             config.update(
                 {
-                    "working_hours": working_time["working_hours"],
+                    "standard_working_hours": standard_working_hours,
+                    "care_leave_hours": min(
+                        standard_working_hours, float(care_leave_hours)
+                    ),
+                    "care_leave_period_count": int(care_leave_period_count),
+                    "working_hours": max(
+                        0, standard_working_hours - float(care_leave_hours)
+                    ),
                     "working_days": working_time["working_days"],
                     "calendar_source": working_time["calendar_source"],
+                }
+            )
+        else:
+            config.update(
+                {
+                    "standard_working_hours": config["working_hours"],
+                    "care_leave_hours": 0,
+                    "care_leave_period_count": 0,
                 }
             )
         try:
             calculation = calculate_estonian_payroll(
                 config, payment_year=int(month_key[:4])
             )
+            if config["care_leave_hours"]:
+                original_config = {
+                    **config,
+                    "working_hours": config["standard_working_hours"],
+                    "care_leave_hours": 0,
+                    "care_leave_period_count": 0,
+                }
+                original = calculate_estonian_payroll(
+                    original_config, payment_year=int(month_key[:4])
+                )
+                calculation["care_leave_original_net_income"] = original[
+                    "net_income"
+                ]
+                calculation["care_leave_net_salary_reduction"] = round(
+                    original["net_income"] - calculation["net_income"], 2
+                )
+            else:
+                calculation["care_leave_original_net_income"] = calculation[
+                    "net_income"
+                ]
+                calculation["care_leave_net_salary_reduction"] = 0.0
         except EstonianPayrollError as err:
             raise BudgetValidationError(str(err)) from err
         prepared["income_calculation"] = calculation
@@ -499,6 +573,390 @@ class BudgetManager:
                 prepared, existing_id=item["id"]
             )
 
+    def _resolve_care_leave_income(
+        self, care_leave: dict[str, Any], *, required: bool
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Resolve and validate the hourly income linked to care leave."""
+        income_month = care_leave.get("income_month", "")
+        month = self._data.get("months", {}).get(income_month)
+        if month is None:
+            if required:
+                raise BudgetValidationError(
+                    "The linked income month does not exist"
+                )
+            return None
+        linked_id = care_leave.get("linked_income_item_id", "")
+        linked_series = care_leave.get("linked_income_series_id", "")
+        income = next(
+            (
+                item
+                for item in month.get("items", [])
+                if item.get("id") == linked_id
+            ),
+            None,
+        )
+        if income is None and linked_series:
+            income = next(
+                (
+                    item
+                    for item in month.get("items", [])
+                    if item.get("series_id") == linked_series
+                    and item.get("kind") == "income"
+                ),
+                None,
+            )
+        calculation = income.get("income_calculation") if income else None
+        if (
+            income is None
+            or income.get("kind") != "income"
+            or not calculation
+            or calculation.get("working_hours_mode") != "automatic"
+        ):
+            if required:
+                raise BudgetValidationError(
+                    "Child-care leave requires an automatic Estonian hourly income"
+                )
+            return None
+        working_time_month = income_working_time_month(
+            income_month, calculation.get("work_period", "budget_month")
+        )
+        if working_time_month != care_leave.get("work_month"):
+            if required:
+                raise BudgetValidationError(
+                    "The linked income does not use this care-leave work month"
+                )
+            return None
+        care_leave["linked_income_item_id"] = income["id"]
+        care_leave["linked_income_series_id"] = str(
+            income.get("series_id") or ""
+        )
+        care_leave["linked_income_name"] = income.get("name", "")
+        return income_month, income
+
+    @staticmethod
+    def _care_leave_links_income(
+        care_leave: dict[str, Any], income: dict[str, Any], income_month: str
+    ) -> bool:
+        """Return whether a care container targets an income occurrence."""
+        if care_leave.get("income_month") != income_month:
+            return False
+        if care_leave.get("linked_income_item_id") == income.get("id"):
+            return True
+        series_id = income.get("series_id")
+        return bool(
+            series_id
+            and care_leave.get("linked_income_series_id") == series_id
+        )
+
+    async def _async_previous_year_working_hours(self, work_year: int) -> float:
+        """Return standard hours used to approximate prior-year income."""
+        total = 0.0
+        previous_year = work_year - 1
+        for month_number in range(1, 13):
+            working_time = await self._estonian_calendar.async_month(
+                f"{previous_year:04d}-{month_number:02d}"
+            )
+            total += float(working_time["working_hours"])
+        return round(total, 2)
+
+    async def _async_rebuild_all_care_leave_effects(self) -> None:
+        """Recalculate linked salaries and generated benefit incomes."""
+        generated_existing: dict[tuple[str, str], dict[str, Any]] = {}
+        reset_references: list[dict[str, Any]] = []
+        care_items: list[tuple[str, dict[str, Any]]] = []
+
+        for month_key, month in self._data.get("months", {}).items():
+            kept_items = []
+            for item in month.get("items", []):
+                if item.get("generated_type") == GENERATED_BENEFIT_TYPE:
+                    generated = item.get("generated") or {}
+                    key = (
+                        str(generated.get("source_care_item_id") or ""),
+                        str(generated.get("source_period_id") or ""),
+                    )
+                    generated_existing[key] = deepcopy(item)
+                    reset_references.append(generated)
+                    continue
+                kept_items.append(item)
+                if item.get("expense_type") == CARE_LEAVE_TYPE:
+                    care_items.append((month_key, item))
+                calculation = item.get("income_calculation") or {}
+                if float(calculation.get("care_leave_hours", 0) or 0) > 0:
+                    reset_references.append(
+                        {
+                            "income_month": month_key,
+                            "linked_income_item_id": item.get("id"),
+                            "linked_income_series_id": item.get("series_id"),
+                            "work_month": calculation.get(
+                                "working_time_month", ""
+                            ),
+                        }
+                    )
+            month["items"] = kept_items
+
+        grouped: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+        targets: dict[tuple[str, str], dict[str, Any]] = {}
+        for _source_month, care_item in care_items:
+            care_leave = care_item.get("care_leave") or {}
+            resolved = self._resolve_care_leave_income(
+                care_leave, required=False
+            )
+            if resolved is None:
+                continue
+            income_month, income = resolved
+            key = (income_month, income["id"])
+            targets[key] = income
+            grouped.setdefault(key, []).append((_source_month, care_item))
+
+        for reference in reset_references:
+            resolved = self._resolve_care_leave_income(
+                {
+                    "income_month": reference.get("income_month", ""),
+                    "linked_income_item_id": reference.get(
+                        "linked_income_item_id", ""
+                    ),
+                    "linked_income_series_id": reference.get(
+                        "linked_income_series_id", ""
+                    ),
+                    "work_month": reference.get("work_month", ""),
+                },
+                required=False,
+            )
+            if resolved is not None:
+                income_month, income = resolved
+                targets[(income_month, income["id"])] = income
+
+        annual_hours_cache: dict[int, float] = {}
+        for key, income in targets.items():
+            income_month, income_id = key
+            calculation = income.get("income_calculation") or {}
+            work_month = income_working_time_month(
+                income_month, calculation.get("work_period", "budget_month")
+            )
+            working_time = await self._estonian_calendar.async_month(work_month)
+            linked_care_items = grouped.get(key, [])
+            missed_hours = 0.0
+            period_count = 0
+
+            for _source_month, care_item in linked_care_items:
+                care_leave = care_item["care_leave"]
+                if care_leave["benefit_basis_mode"] == "estimated_hourly":
+                    work_year = int(work_month[:4])
+                    if work_year not in annual_hours_cache:
+                        annual_hours_cache[work_year] = (
+                            await self._async_previous_year_working_hours(work_year)
+                        )
+                    previous_year_hours = annual_hours_cache[work_year]
+                else:
+                    previous_year_hours = 0.0
+
+                for period in care_leave.get("periods", []):
+                    period_count += 1
+                    result = calculate_care_period(
+                        period,
+                        hourly_gross=calculation["hourly_gross"],
+                        previous_year_working_hours=previous_year_hours,
+                        benefit_basis_mode=care_leave["benefit_basis_mode"],
+                        actual_previous_year_income=care_leave[
+                            "actual_previous_year_income"
+                        ],
+                        public_holidays=working_time["public_holidays"],
+                        shortened_workdays=working_time["shortened_workdays"],
+                        benefit_year=int(work_month[:4]),
+                    )
+                    period["calculation"] = result
+                    missed_hours += result["missed_working_hours"]
+
+            prepared = await self._async_prepare_calculated_income(
+                income,
+                income_month,
+                care_leave_hours=missed_hours,
+                care_leave_period_count=period_count,
+            )
+            normalized_income = normalize_item(
+                prepared, existing_id=income_id
+            )
+            target_month = self._data["months"][income_month]
+            income_index = next(
+                index
+                for index, candidate in enumerate(target_month["items"])
+                if candidate.get("id") == income_id
+            )
+            target_month["items"][income_index] = normalized_income
+
+            for _source_month, care_item in linked_care_items:
+                care_leave = care_item["care_leave"]
+                for period in care_leave.get("periods", []):
+                    existing_key = (care_item["id"], period["id"])
+                    existing = generated_existing.get(existing_key, {})
+                    result = period["calculation"]
+                    date_label = (
+                        period["start"]
+                        if period["start"] == period["end"]
+                        else f"{period['start']}–{period['end']}"
+                    )
+                    generated_item = normalize_item(
+                        {
+                            "id": existing.get("id") or new_id(),
+                            "name": f"Tervisekassa care benefit · {date_label}",
+                            "kind": "income",
+                            "amount": result["estimated_net_benefit"],
+                            "due_day": existing.get("due_day"),
+                            "status": existing.get("status", STATUS_PENDING),
+                            "paid_at": existing.get("paid_at"),
+                            "category": "Tervisekassa",
+                            "recurrence": RECURRENCE_SINGLE,
+                            "notes": (
+                                "Automatic approximation. Actual Tervisekassa "
+                                "payment may differ from this estimate."
+                            ),
+                            "generated_type": GENERATED_BENEFIT_TYPE,
+                            "generated": {
+                                "source_care_item_id": care_item["id"],
+                                "source_period_id": period["id"],
+                                "linked_income_item_id": income_id,
+                                "linked_income_series_id": normalized_income.get(
+                                    "series_id"
+                                ),
+                                "income_month": income_month,
+                                "work_month": work_month,
+                                "period_start": period["start"],
+                                "period_end": period["end"],
+                                "estimated": True,
+                                "calculation": deepcopy(result),
+                            },
+                        }
+                    )
+                    target_month["items"].append(generated_item)
+
+    def _validate_care_leave_item(self, item: dict[str, Any]) -> None:
+        """Validate a care container against its linked income."""
+        if item.get("expense_type") != CARE_LEAVE_TYPE:
+            return
+        self._resolve_care_leave_income(item["care_leave"], required=True)
+
+    def _assert_income_not_linked_to_care_leave(
+        self, income: dict[str, Any], income_month: str
+    ) -> None:
+        """Prevent removing a salary that active care-leave planning depends on."""
+        if income.get("kind") != "income":
+            return
+        for month in self._data.get("months", {}).values():
+            for item in month.get("items", []):
+                if item.get("expense_type") != CARE_LEAVE_TYPE:
+                    continue
+                if self._care_leave_links_income(
+                    item.get("care_leave") or {}, income, income_month
+                ):
+                    raise BudgetValidationError(
+                        "This income is linked to child-care leave. Delete or relink "
+                        "the care-leave item first."
+                    )
+
+    async def async_upsert_care_leave_period(
+        self, month_key: str, item_id: str, raw: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create or edit one calendar period inside a care container."""
+        validate_month_key(month_key)
+        async with self._lock:
+            month = self._require_month(month_key)
+            item = next(
+                (candidate for candidate in month["items"] if candidate["id"] == item_id),
+                None,
+            )
+            if item is None or item.get("expense_type") != CARE_LEAVE_TYPE:
+                raise BudgetValidationError("Child-care leave item does not exist")
+            raw_id = str(raw.get("id") or "")
+            existing = next(
+                (
+                    period
+                    for period in item["care_leave"]["periods"]
+                    if period["id"] == raw_id
+                ),
+                None,
+            )
+            try:
+                period = normalize_care_period(
+                    {**(existing or {}), **raw, "id": raw_id or new_id()},
+                    existing_id=raw_id or None,
+                )
+            except EstonianCareLeaveError as err:
+                raise BudgetValidationError(str(err)) from err
+            periods = [
+                candidate
+                for candidate in item["care_leave"]["periods"]
+                if candidate["id"] != raw_id
+            ]
+            periods.append(period)
+            candidate_item = normalize_item(
+                {
+                    **item,
+                    "care_leave": {**item["care_leave"], "periods": periods},
+                },
+                existing_id=item["id"],
+            )
+            self._validate_care_leave_item(candidate_item)
+
+            new_dates = set(
+                date.fromisoformat(period["start"])
+                + timedelta(days=offset)
+                for offset in range(
+                    (date.fromisoformat(period["end"]) - date.fromisoformat(period["start"])).days + 1
+                )
+            )
+            for other_month in self._data["months"].values():
+                for other_item in other_month.get("items", []):
+                    if (
+                        other_item.get("expense_type") != CARE_LEAVE_TYPE
+                        or other_item.get("id") == item_id
+                        or not self._care_leave_links_income(
+                            other_item.get("care_leave") or {},
+                            self._resolve_care_leave_income(
+                                candidate_item["care_leave"], required=True
+                            )[1],
+                            candidate_item["care_leave"]["income_month"],
+                        )
+                    ):
+                        continue
+                    for other_period in other_item["care_leave"].get("periods", []):
+                        other_start = date.fromisoformat(other_period["start"])
+                        other_end = date.fromisoformat(other_period["end"])
+                        other_dates = {
+                            other_start + timedelta(days=offset)
+                            for offset in range((other_end - other_start).days + 1)
+                        }
+                        if new_dates.intersection(other_dates):
+                            raise BudgetValidationError(
+                                "Care-leave periods linked to the same income cannot overlap"
+                            )
+
+            item_index = month["items"].index(item)
+            month["items"][item_index] = candidate_item
+            await self._async_rebuild_all_care_leave_effects()
+            await self._async_commit()
+            return deepcopy(period)
+
+    async def async_delete_care_leave_period(
+        self, month_key: str, item_id: str, period_id: str
+    ) -> None:
+        """Remove one care-leave period and rebuild generated effects."""
+        validate_month_key(month_key)
+        async with self._lock:
+            month = self._require_month(month_key)
+            item = next(
+                (candidate for candidate in month["items"] if candidate["id"] == item_id),
+                None,
+            )
+            if item is None or item.get("expense_type") != CARE_LEAVE_TYPE:
+                raise BudgetValidationError("Child-care leave item does not exist")
+            periods = item["care_leave"]["periods"]
+            filtered = [period for period in periods if period["id"] != period_id]
+            if len(filtered) == len(periods):
+                raise BudgetValidationError("Care-leave period does not exist")
+            item["care_leave"]["periods"] = filtered
+            await self._async_rebuild_all_care_leave_effects()
+            await self._async_commit()
+
     async def async_delete_item(
         self, month_key: str, item_id: str, *, scope: str = "this"
     ) -> None:
@@ -511,11 +969,24 @@ class BudgetManager:
             item = next((item for item in month["items"] if item["id"] == item_id), None)
             if item is None:
                 raise BudgetValidationError("Item does not exist")
+            if item.get("generated_type") == GENERATED_BENEFIT_TYPE:
+                raise BudgetValidationError(
+                    "Delete the source care-leave period to remove this automatic income"
+                )
             if scope == "future" and item.get("series_id"):
                 series_id = item["series_id"]
                 for key, stored_month in self._data["months"].items():
                     if key < month_key:
                         continue
+                    for candidate in stored_month["items"]:
+                        if (
+                            candidate.get("series_id") == series_id
+                            and candidate.get("status", STATUS_PENDING)
+                            == STATUS_PENDING
+                        ):
+                            self._assert_income_not_linked_to_care_leave(
+                                candidate, key
+                            )
                     stored_month["items"] = [
                         candidate
                         for candidate in stored_month["items"]
@@ -525,7 +996,9 @@ class BudgetManager:
                         )
                     ]
             else:
+                self._assert_income_not_linked_to_care_leave(item, month_key)
                 month["items"].remove(item)
+            await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
 
     async def async_set_item_status(
@@ -540,6 +1013,10 @@ class BudgetManager:
             item = next((item for item in month["items"] if item["id"] == item_id), None)
             if item is None:
                 raise BudgetValidationError("Item does not exist")
+            if item.get("expense_type") == CARE_LEAVE_TYPE:
+                raise BudgetValidationError(
+                    "Child-care leave periods are managed from the care-leave editor"
+                )
             if item["kind"] == "income" and status == STATUS_PAID:
                 status = STATUS_RECEIVED
             if item["kind"] in {"expense", KIND_SAVINGS} and status == STATUS_RECEIVED:

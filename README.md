@@ -16,6 +16,8 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Detailed month view with expected income, expenditures, manual account balance, remaining forecast, and automatic EUR/day calculation.
 - The **Budget** sidebar opens the active budget cycle: with the default cycle end on the 2nd, the previous month remains active through the 2nd and the new month opens on the 3rd.
 - Advanced Estonian hourly income converts hourly gross pay into estimated net income using either the budget month's or previous month's working-time fund, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
+- Estonian child-care sick leave can be linked to an automatic hourly salary. Calendar periods reduce only scheduled work hours, while each period creates a separate estimated Tervisekassa income in the salary-payment month.
+- Care-benefit planning can approximate the previous year's income from the linked hourly salary or use a user-entered previous-year social-taxable income total.
 - Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
 - Add, edit, and delete income, expenditures, and savings.
 - One-time, monthly, and yearly items.
@@ -67,6 +69,24 @@ For an income item, enable **Calculate monthly net income from an hourly gross r
 Holiday dates are requested on demand from the public [Nager.Date API](https://date.nager.at/Api). Only the year and Estonia country code are sent. No item names, rates, balances, or other budget data leave Home Assistant. If the API is unavailable, Budget Manager calculates the statutory Estonian holidays locally.
 
 The built-in payroll defaults follow the Estonian Tax and Customs Board's published 2026 rates: 22% income tax, €700 monthly basic exemption, 33% social tax with an €886 minimum base, 1.6% employee and 0.8% employer unemployment insurance, and optional 2/4/6% funded pension. Future months continue using the latest built-in rates until the integration is updated. The result is a planning estimate, not payroll or tax advice.
+
+### Estonian child-care sick leave
+
+Add an expenditure and choose **Child-care sick leave**. Link it to an income that uses automatic Estonian hourly calculation for the affected work month. For a salary paid afterward, that income belongs to the following budget month and uses **The previous month** as its work period. Open the care-leave row to add, edit, or remove separate calendar periods.
+
+For each period Budget Manager:
+
+- deducts salary hours only for Monday–Friday scheduled workdays, excluding Estonian public holidays and respecting shortened workdays;
+- counts all calendar days in the estimated care benefit, so a weekend-only period adds an estimated Tervisekassa income without reducing salary;
+- recalculates the linked net salary; and
+- creates a separate, status-trackable estimated Tervisekassa income in the salary-payment month.
+
+The benefit basis is configurable:
+
+- **Estimate from the selected hourly income** approximates the previous calendar year's income as the current hourly gross rate multiplied by Estonia's standard working hours for that prior year.
+- **Use actual previous-year social-taxable income** asks for the previous calendar year's total gross income on which social tax was paid, as reported to MTA. It is an annual amount—not net salary and not one month's income.
+
+The built-in 2026 approximation follows Tervisekassa's published child-care rules: payment from the first calendar day, 80% of daily income, up to 60 days when caring for a child under 12, 22% income-tax withholding, and the 2026 daily cap of €126.87. Tervisekassa normally uses previous-calendar-year social-taxable income and official eligibility data. Budget Manager cannot see all of those details, so generated values are always labeled **Estimated** and are planning figures, not benefit decisions. See [Tervisekassa's care-benefit guidance](https://tervisekassa.ee/inimesele/huvitised/hooldushuvitis).
 
 ## Installation
 
@@ -122,6 +142,7 @@ Copying a month or year:
 - Assigns fresh occurrence IDs.
 - Uses the global cycle-end setting and shifts recurrence-end dates relative to the target period.
 - Preserves series linkage inside a copied year without linking the copy to the source year's history.
+- Does not copy child-care leave periods or their generated Tervisekassa income; these are event-specific and must be recorded in the affected work month.
 
 When creating a year without **Overwrite**, existing target months are preserved and only missing months are filled. This makes it safe to complete a partially planned year. Enabling **Overwrite** replaces all 12 target months.
 

@@ -317,6 +317,7 @@ class BudgetManagerPanel extends HTMLElement {
     for (const monthKey of months) {
       const month = this._state.months[monthKey];
       for (const item of month?.items || []) {
+        if (item.expense_type === "child_care_leave") continue;
         if (!this._itemHasMonthlyValue(item) && !this._matrixEditMode) continue;
         const key = `${item.kind}:${item.name}`;
         if (!rows.has(key)) rows.set(key, { name: item.name, kind: item.kind, months: {} });
@@ -393,7 +394,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (!month) return `<div class="empty">Month not found.</div>`;
     const summary = month.summary;
     const income = month.items.filter((item) => item.kind === "income" && this._itemHasMonthlyValue(item));
-    const expenses = month.items.filter((item) => item.kind === "expense" && this._itemHasMonthlyValue(item));
+    const expenses = month.items.filter((item) => item.kind === "expense" && (item.expense_type === "child_care_leave" || this._itemHasMonthlyValue(item)));
     const savings = month.items.filter((item) => item.kind === "savings");
     return `
       <section class="month-toolbar">
@@ -418,7 +419,7 @@ class BudgetManagerPanel extends HTMLElement {
 
   _renderItems(title, items, kind) {
     return `<section class="items-section">
-      <div class="section-title"><div><h2>${title}</h2><p>${items.filter((item) => item.status === "pending").length} still open</p></div></div>
+      <div class="section-title"><div><h2>${title}</h2><p>${items.filter((item) => item.status === "pending" && item.expense_type !== "child_care_leave").length} still open</p></div></div>
       <div class="items-list">
         ${items.length ? items.map((item) => this._renderItem(item, kind)).join("") : `<div class="empty-row">No items</div>`}
       </div>
@@ -432,6 +433,21 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _renderItem(item, kind) {
+    if (item.expense_type === "child_care_leave") {
+      const care = item.care_leave || {};
+      const periods = care.periods || [];
+      const totalBenefit = periods.reduce((total, period) => total + Number(period.calculation?.estimated_net_benefit || 0), 0);
+      const totalHours = periods.reduce((total, period) => total + Number(period.calculation?.missed_working_hours || 0), 0);
+      return `<article class="item care-leave-item">
+        <button class="status-button care-calendar" data-action="edit-item" data-id="${item.id}" title="Manage care-leave periods" aria-label="Manage care-leave periods">▦</button>
+        <div class="item-main">
+          <div class="item-title">${this._esc(item.name)} <span class="badge care-badge">Care leave</span></div>
+          <div class="item-meta">${periods.length} ${periods.length === 1 ? "period" : "periods"} · ${this._esc(totalHours)} missed work hours · linked to ${this._esc(care.linked_income_name || "hourly income")} in ${this._monthLabel(care.income_month)}</div>
+        </div>
+        <strong class="item-amount care-benefit-total"><small>Est. benefit</small>${this._money(totalBenefit)}</strong>
+        ${this._canEdit ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Manage periods">•••</button>` : ""}
+      </article>`;
+    }
     const complete = item.status === "paid" || item.status === "received";
     const actionLabel = kind === "income" ? (complete ? "Received" : "Mark received") : (complete ? "Paid" : "Mark paid");
     const amount = item.effective_amount ?? item.amount;
@@ -439,17 +455,19 @@ class BudgetManagerPanel extends HTMLElement {
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(item.name)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(item.name)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(item.recurrence_end)}` : " · one-time"}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
+          ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
+          ${item.generated_type === "tervisekassa_care_benefit" ? ` · Tervisekassa approximation for ${this._esc(item.generated?.period_start || "")}–${this._esc(item.generated?.period_end || "")}` : ""}
           ${item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
       <strong class="item-amount">${this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
-      ${this._canEdit ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
+      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
     </article>`;
   }
 
@@ -708,22 +726,57 @@ class BudgetManagerPanel extends HTMLElement {
     });
   }
 
+  _careIncomeOptions(workMonth = this._month) {
+    const options = [];
+    for (const [incomeMonth, month] of Object.entries(this._state.months || {})) {
+      for (const item of month.items || []) {
+        const calculation = item.income_calculation;
+        if (item.kind !== "income" || item.generated_type || !calculation || calculation.working_hours_mode !== "automatic") continue;
+        const calculatedWorkMonth = calculation.working_time_month || this._incomeWorkingMonth(incomeMonth, calculation.work_period || "budget_month");
+        if (calculatedWorkMonth !== workMonth) continue;
+        options.push({ incomeMonth, item });
+      }
+    }
+    return options.sort((left, right) => `${left.incomeMonth}${left.item.name}`.localeCompare(`${right.incomeMonth}${right.item.name}`));
+  }
+
+  _careIncomeOptionValue(incomeMonth, itemId) {
+    return `${incomeMonth}::${itemId}`;
+  }
+
+  _careMonthBounds(monthKey) {
+    const [year, month] = monthKey.split("-").map(Number);
+    const lastDay = new Date(year, month, 0).getDate();
+    return { min: `${monthKey}-01`, max: `${monthKey}-${String(lastDay).padStart(2, "0")}` };
+  }
+
   _openItemEditor(itemId = null) {
     const month = this._state.months[this._month];
     const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
+    if (item?.expense_type === "child_care_leave") return this._openCareLeaveEditor(item);
+    if (item?.generated_type === "tervisekassa_care_benefit") return;
     const incomeCalculation = item?.income_calculation || null;
     const automaticWorkingHours = (incomeCalculation?.working_hours_mode || "automatic") === "automatic";
     const fundedPensionRate = Number(incomeCalculation?.funded_pension_rate || 0);
     const fundedPensionIsJoined = incomeCalculation?.funded_pension_joined ?? (fundedPensionRate > 0);
     const workPeriod = incomeCalculation?.work_period || "budget_month";
     const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
+    const careIncomeOptions = this._careIncomeOptions();
     const fields = `
       ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
       <div class="two-col">
-        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option><option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option></select></label>
+        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option><option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option><option value="care_leave">Child-care sick leave</option></select></label>
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
+      <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
+        <legend>Child-care sick leave</legend>
+        ${careIncomeOptions.length ? `<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${careIncomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}">${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>` : `<div class="review-notice"><strong>No eligible income found</strong><span>Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month.</span></div>`}
+        <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="benefit-basis-mode"><option value="estimated_hourly">Estimate from the selected hourly income</option><option value="actual_previous_year_income">Use actual previous-year social-taxable income</option></select></label>
+        <label id="actual-income-field" hidden><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value=""></label>
+        <p class="form-help" id="care-basis-help"></p>
+        <p class="form-help">After this item is created, open it to add separate care-leave periods with calendar dates. Budget Manager will reduce scheduled working hours only and add one estimated Tervisekassa income per period.</p>
+      </fieldset>
       <fieldset class="settings-group income-calculation" id="income-calculation" hidden>
         <legend>Estonian hourly income</legend>
         <label class="check"><input type="checkbox" name="estonian_hourly" id="estonian-hourly" ${incomeCalculation ? "checked" : ""}><span>Calculate monthly net income from an hourly gross rate</span></label>
@@ -767,22 +820,41 @@ class BudgetManagerPanel extends HTMLElement {
     const extra = item ? `<button type="button" class="danger-button" id="delete-item">Delete</button>` : "";
     const modal = this._openModal(item ? "Edit item" : "Add item", fields, item ? "Save" : "Add", async (form) => {
       const recurrence = form.get("recurrence");
-      const kind = form.get("kind");
+      const selectedKind = form.get("kind");
+      const isCareLeave = selectedKind === "care_leave";
+      const kind = isCareLeave ? "expense" : selectedKind;
       const useEstonianHourly = kind === "income" && form.has("estonian_hourly");
       const hourlyGross = Number(form.get("hourly_gross"));
       const workingHours = Number(form.get("working_hours"));
       if (useEstonianHourly && (!Number.isFinite(hourlyGross) || hourlyGross <= 0)) throw new Error("Hourly gross must be greater than zero.");
       if (useEstonianHourly && (!Number.isFinite(workingHours) || workingHours <= 0)) throw new Error("Working hours must be greater than zero.");
+      const careLink = String(form.get("care_income_link") || "").split("::");
+      if (isCareLeave && careLink.length !== 2) throw new Error("Create an automatic Estonian hourly income for this work month before adding care leave.");
+      const linkedIncome = isCareLeave ? this._state.months[careLink[0]]?.items.find((entry) => entry.id === careLink[1]) : null;
+      const basisMode = String(form.get("benefit_basis_mode") || "estimated_hourly");
+      const actualPreviousYearIncome = Number(form.get("actual_previous_year_income") || 0);
+      if (isCareLeave && basisMode === "actual_previous_year_income" && (!Number.isFinite(actualPreviousYearIncome) || actualPreviousYearIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
       await this._hass.callWS({
         type: "budget_manager/upsert_item",
         month: this._month,
         scope: form.get("scope") || "this",
         item: {
           ...(item || {}),
-          name: form.get("name"), kind, amount: Number(form.get("amount")),
-          due_day: form.get("due_day") ? Number(form.get("due_day")) : null,
-          category: form.get("category"), recurrence,
-          recurrence_end: recurrence === "single" ? null : form.get("recurrence_end"),
+          name: form.get("name"), kind, amount: isCareLeave ? 0 : Number(form.get("amount")),
+          due_day: isCareLeave ? null : (form.get("due_day") ? Number(form.get("due_day")) : null),
+          category: isCareLeave ? "Care leave" : form.get("category"), recurrence: isCareLeave ? "single" : recurrence,
+          recurrence_end: isCareLeave || recurrence === "single" ? null : form.get("recurrence_end"),
+          expense_type: isCareLeave ? "child_care_leave" : "standard",
+          care_leave: isCareLeave ? {
+            linked_income_item_id: careLink[1],
+            linked_income_series_id: linkedIncome?.series_id || "",
+            linked_income_name: linkedIncome?.name || "",
+            work_month: this._month,
+            income_month: careLink[0],
+            periods: [],
+            benefit_basis_mode: basisMode,
+            actual_previous_year_income: basisMode === "actual_previous_year_income" ? actualPreviousYearIncome : 0,
+          } : null,
           income_calculation: useEstonianHourly ? {
             mode: "estonian_hourly",
             hourly_gross: hourlyGross,
@@ -800,9 +872,9 @@ class BudgetManagerPanel extends HTMLElement {
             funded_pension_joined: form.has("funded_pension_joined"),
             funded_pension_rate: form.has("funded_pension_joined") ? Number(form.get("funded_pension_rate")) : 0,
           } : null,
-          dynamic: form.has("dynamic"),
+          dynamic: !isCareLeave && form.has("dynamic"),
           needs_review: false,
-          special: form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
+          special: !isCareLeave && form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
         },
       });
     }, extra);
@@ -815,6 +887,13 @@ class BudgetManagerPanel extends HTMLElement {
     const dynamicSavings = modal.root.querySelector("#dynamic-savings");
     const dynamicSavingsHelp = modal.root.querySelector("#dynamic-savings-help");
     const amountInput = modal.root.querySelector('[name="amount"]');
+    const nameInput = modal.root.querySelector('[name="name"]');
+    const careLeaveSection = modal.root.querySelector("#care-leave-settings");
+    const careIncomeLink = modal.root.querySelector("#care-income-link");
+    const benefitBasisMode = modal.root.querySelector("#benefit-basis-mode");
+    const actualIncomeField = modal.root.querySelector("#actual-income-field");
+    const actualIncomeInput = modal.root.querySelector('[name="actual_previous_year_income"]');
+    const careBasisHelp = modal.root.querySelector("#care-basis-help");
     const incomeSection = modal.root.querySelector("#income-calculation");
     const estonianHourly = modal.root.querySelector("#estonian-hourly");
     const payrollFields = modal.root.querySelector("#estonian-payroll-fields");
@@ -857,7 +936,7 @@ class BudgetManagerPanel extends HTMLElement {
     const updatePayrollControls = () => {
       const enabled = kindSelect.value === "income" && estonianHourly.checked;
       payrollFields.hidden = !enabled;
-      amountInput.readOnly = enabled;
+      amountInput.readOnly = enabled || kindSelect.value === "care_leave";
       workingHoursInput.readOnly = enabled && automaticHours.checked;
       refreshWorkingHours.hidden = !enabled || !automaticHours.checked;
       fundedPensionJoined.closest("label").classList.toggle("muted", !fundedPensionJoined.checked);
@@ -887,13 +966,38 @@ class BudgetManagerPanel extends HTMLElement {
     };
     const updateKind = () => {
       const savingsVisible = kindSelect.value === "savings";
+      const careVisible = kindSelect.value === "care_leave";
       dynamicSavings.hidden = !savingsVisible;
       dynamicSavingsHelp.hidden = !savingsVisible;
       incomeSection.hidden = kindSelect.value !== "income";
+      careLeaveSection.hidden = !careVisible;
+      careLeaveSection.querySelectorAll("input,select").forEach((control) => { control.disabled = !careVisible; });
+      if (careIncomeLink) careIncomeLink.required = careVisible;
+      recurrenceSelect.closest(".two-col").hidden = careVisible;
+      modal.root.querySelector('[name="due_day"]').closest(".two-col").hidden = careVisible;
+      modal.root.querySelector('[name="special"]').closest("label").hidden = careVisible;
+      modal.root.querySelector('[name="special_label"]').closest("label").hidden = careVisible;
+      if (careVisible) {
+        recurrenceSelect.value = "single";
+        amountInput.value = "0";
+        if (!nameInput.value.trim()) nameInput.value = "Child-care sick leave";
+      }
       if (savingsVisible && amountInput.value === "") amountInput.value = "0";
+      updateEnd();
       updatePayrollControls();
+      updateCareBasis();
+    };
+    const updateCareBasis = () => {
+      const actual = benefitBasisMode.value === "actual_previous_year_income";
+      actualIncomeField.hidden = !actual;
+      actualIncomeInput.disabled = kindSelect.value !== "care_leave" || !actual;
+      actualIncomeInput.required = kindSelect.value === "care_leave" && actual;
+      careBasisHelp.textContent = actual
+        ? "Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides this annual amount by 365; the result is still shown as an approximation."
+        : "Budget Manager approximates the previous calendar year's income from the selected hourly gross rate and Estonia's standard working hours. This is useful for planning but can differ from Tervisekassa's actual source data.";
     };
     kindSelect.onchange = updateKind;
+    benefitBasisMode.onchange = updateCareBasis;
     estonianHourly.onchange = () => {
       updatePayrollControls();
       if (estonianHourly.checked && automaticHours.checked && !workingHoursInput.value) loadWorkingHours();
@@ -928,6 +1032,117 @@ class BudgetManagerPanel extends HTMLElement {
       const scope = item.series_id && window.confirm("Delete this and all future unpaid occurrences?\n\nOK = future series, Cancel = only this occurrence") ? "future" : "this";
       try {
         await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope });
+        modal.close();
+        await this._load(this._year);
+      } catch (err) { this._showError(err); }
+    };
+  }
+
+  _openCareLeaveEditor(item) {
+    const care = item.care_leave || {};
+    const incomeOptions = this._careIncomeOptions(care.work_month || this._month);
+    const selectedLink = this._careIncomeOptionValue(care.income_month, care.linked_income_item_id);
+    const bounds = this._careMonthBounds(care.work_month || this._month);
+    const periods = care.periods || [];
+    const basisMode = care.benefit_basis_mode || "estimated_hourly";
+    const periodRows = periods.length ? periods.map((period) => {
+      const calculation = period.calculation || {};
+      const dateLabel = period.start === period.end ? period.start : `${period.start} – ${period.end}`;
+      return `<article class="care-period" data-period-id="${period.id}">
+        <div><strong>${this._esc(dateLabel)}</strong><span>${this._esc(calculation.calendar_days || 0)} calendar days · ${this._esc(calculation.missed_working_hours || 0)} missed work hours</span><span>Estimated Tervisekassa net benefit ${this._money(calculation.estimated_net_benefit || 0)}</span></div>
+        <div class="care-period-actions"><button type="button" class="quiet edit-care-period" data-period-id="${period.id}">Edit</button><button type="button" class="danger-button delete-care-period" data-period-id="${period.id}">Remove</button></div>
+      </article>`;
+    }).join("") : `<div class="empty-row">No care-leave periods recorded yet.</div>`;
+    const fields = `
+      <div class="review-notice care-estimate-notice"><strong>Planning approximation</strong><span>Budget Manager estimates the salary reduction and Tervisekassa payment. The final payment can differ because Tervisekassa uses official income and eligibility data.</span></div>
+      ${this._field("Name", "name", item.name, "text", "required")}
+      <label><span>Salary affected by this leave</span><select name="care_income_link" required>${incomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}" ${this._careIncomeOptionValue(incomeMonth, income.id) === selectedLink ? "selected" : ""}>${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>
+      <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${basisMode === "estimated_hourly" ? "selected" : ""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${basisMode === "actual_previous_year_income" ? "selected" : ""}>Use actual previous-year social-taxable income</option></select></label>
+      <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(care.actual_previous_year_income || "")}"></label>
+      <p class="form-help" id="care-editor-basis-help"></p>
+      <section class="care-periods"><div class="care-periods-head"><div><strong>Recorded periods</strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">＋ Add period</button></div>${periodRows}</section>
+      <fieldset class="settings-group" id="care-period-form" hidden>
+        <legend id="care-period-form-title">Add period</legend>
+        <input type="hidden" id="care-period-id">
+        <div class="two-col">${this._field("Start date", "care_period_start", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}${this._field("End date", "care_period_end", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}</div>
+        <div class="inline-actions"><button type="button" class="quiet" id="cancel-care-period">Cancel</button><button type="button" class="primary" id="save-care-period">Save period</button></div>
+      </fieldset>`;
+    const modal = this._openModal("Child-care sick leave", fields, "Save settings", async (form) => {
+      const link = String(form.get("care_income_link") || "").split("::");
+      if (link.length !== 2) throw new Error("Select an eligible automatic hourly income.");
+      const linkedIncome = this._state.months[link[0]]?.items.find((entry) => entry.id === link[1]);
+      const selectedBasis = String(form.get("benefit_basis_mode"));
+      const actualIncome = Number(form.get("actual_previous_year_income") || 0);
+      if (selectedBasis === "actual_previous_year_income" && (!Number.isFinite(actualIncome) || actualIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
+      await this._hass.callWS({
+        type: "budget_manager/upsert_item", month: this._month, scope: "this",
+        item: { ...item, name: form.get("name"), expense_type: "child_care_leave", care_leave: {
+          ...care,
+          linked_income_item_id: link[1], linked_income_series_id: linkedIncome?.series_id || "", linked_income_name: linkedIncome?.name || "",
+          income_month: link[0], work_month: this._month, benefit_basis_mode: selectedBasis,
+          actual_previous_year_income: selectedBasis === "actual_previous_year_income" ? actualIncome : 0,
+        } },
+      });
+    }, `<button type="button" class="danger-button" id="delete-care-item">Delete care leave</button>`);
+
+    const basisSelect = modal.root.querySelector("#care-editor-basis");
+    const actualField = modal.root.querySelector("#care-editor-actual-field");
+    const actualInput = actualField.querySelector("input");
+    const basisHelp = modal.root.querySelector("#care-editor-basis-help");
+    const updateBasis = () => {
+      const actual = basisSelect.value === "actual_previous_year_income";
+      actualField.hidden = !actual;
+      actualInput.required = actual;
+      basisHelp.textContent = actual
+        ? "Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides the annual amount by 365. This remains an estimate because official exceptions and eligibility data are not available to Budget Manager."
+        : "The prior-year basis is approximated from this salary's hourly gross rate and Estonia's standard working hours. Use the actual-income option when you know the annual social-taxable amount reported to MTA.";
+    };
+    basisSelect.onchange = updateBasis;
+    updateBasis();
+
+    const periodForm = modal.root.querySelector("#care-period-form");
+    const periodId = modal.root.querySelector("#care-period-id");
+    const periodStart = modal.root.querySelector('[name="care_period_start"]');
+    const periodEnd = modal.root.querySelector('[name="care_period_end"]');
+    const openPeriodForm = (period = null) => {
+      periodForm.hidden = false;
+      periodId.value = period?.id || "";
+      periodStart.value = period?.start || bounds.min;
+      periodEnd.value = period?.end || period?.start || bounds.min;
+      modal.root.querySelector("#care-period-form-title").textContent = period ? "Edit period" : "Add period";
+      periodStart.focus();
+    };
+    modal.root.querySelector("#new-care-period").onclick = () => openPeriodForm();
+    modal.root.querySelector("#cancel-care-period").onclick = () => { periodForm.hidden = true; };
+    modal.root.querySelectorAll(".edit-care-period").forEach((button) => {
+      button.onclick = () => openPeriodForm(periods.find((period) => period.id === button.dataset.periodId));
+    });
+    modal.root.querySelector("#save-care-period").onclick = async () => {
+      try {
+        if (!periodStart.value || !periodEnd.value) throw new Error("Select both the start and end dates.");
+        await this._hass.callWS({ type: "budget_manager/upsert_care_leave_period", month: this._month, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value } });
+        modal.close();
+        await this._load(this._year);
+        const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
+        if (refreshed) this._openCareLeaveEditor(refreshed);
+      } catch (err) { this._showError(err); }
+    };
+    modal.root.querySelectorAll(".delete-care-period").forEach((button) => {
+      button.onclick = async () => {
+        if (!window.confirm("Remove this care-leave period and its generated Tervisekassa income?")) return;
+        try {
+          await this._hass.callWS({ type: "budget_manager/delete_care_leave_period", month: this._month, item_id: item.id, period_id: button.dataset.periodId });
+          modal.close();
+          await this._load(this._year);
+          const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
+          if (refreshed) this._openCareLeaveEditor(refreshed);
+        } catch (err) { this._showError(err); }
+      };
+    });
+    modal.root.querySelector("#delete-care-item").onclick = async () => {
+      if (!window.confirm("Delete this care-leave item, restore the salary estimate, and remove its generated Tervisekassa income?")) return;
+      try {
+        await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope: "this" });
         modal.close();
         await this._load(this._year);
       } catch (err) { this._showError(err); }
@@ -987,16 +1202,16 @@ class BudgetManagerPanel extends HTMLElement {
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
       .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
-      .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
+      .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-button.care-calendar { color:var(--blue); border-color:color-mix(in srgb,var(--blue) 45%,var(--line)); font-size:18px; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }
       .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { padding:20px; overflow:auto; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
-      .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }
+      .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }.care-periods { display:grid; gap:0; overflow:hidden; border:1px solid var(--line); border-radius:14px; }.care-periods-head,.care-period { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 15px; }.care-periods-head { background:var(--page); }.care-periods-head div,.care-period > div:first-child { display:grid; gap:3px; }.care-periods-head span,.care-period span { color:var(--muted); font-size:11px; }.care-period { border-top:1px solid var(--line); }.care-period-actions,.inline-actions { display:flex; justify-content:flex-end; gap:8px; }.care-period-actions .danger-button { padding:8px 10px; }.care-benefit-total { color:var(--blue); }
       #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-      @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; } }
+      @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
       @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header [data-action="settings"],.header-actions [data-action="refresh"] { display:none; } }
     `;
   }
