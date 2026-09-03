@@ -188,6 +188,7 @@ class BudgetManager:
                 {"income": 0, "expense": 1, "savings": 2}.get(
                     item.get("kind"), 3
                 ),
+                item.get("status", STATUS_PENDING) != STATUS_PENDING,
                 item.get("sort_order", 0),
                 item.get("due_day") or 0,
                 item.get("name", "").casefold(),

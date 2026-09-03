@@ -1016,6 +1016,53 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2026-09", snapshot["months"])
         self.assertIn("2027-01", snapshot["months"])
 
+    async def test_snapshot_places_checked_items_after_open_items(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        month["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Received first",
+                    "kind": "income",
+                    "amount": 10,
+                    "status": "received",
+                    "sort_order": 0,
+                }
+            ),
+            model.normalize_item(
+                {
+                    "name": "Open second",
+                    "kind": "income",
+                    "amount": 20,
+                    "status": "pending",
+                    "sort_order": 1,
+                }
+            ),
+            model.normalize_item(
+                {
+                    "name": "Paid first",
+                    "kind": "expense",
+                    "amount": 30,
+                    "status": "paid",
+                    "sort_order": 0,
+                }
+            ),
+            model.normalize_item(
+                {
+                    "name": "Open second expense",
+                    "kind": "expense",
+                    "amount": 40,
+                    "status": "pending",
+                    "sort_order": 1,
+                }
+            ),
+        ]
+
+        items = self.manager.snapshot(2026)["months"]["2026-09"]["items"]
+        self.assertEqual(
+            [item["name"] for item in items],
+            ["Open second", "Received first", "Open second expense", "Paid first"],
+        )
+
     async def test_month_notes_are_removed_during_migration(self) -> None:
         manager = manager_module.BudgetManager(object(), "old-note")
         old = model.empty_data()

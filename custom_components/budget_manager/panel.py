@@ -42,6 +42,8 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         require_admin=False,
         config={},
         config_panel_domain=DOMAIN,
+        # The native top app bar handles notches and mobile safe areas itself.
+        handle_safe_area=True,
     )
 
 

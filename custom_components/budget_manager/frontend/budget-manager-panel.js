@@ -112,13 +112,6 @@ class BudgetManagerPanel extends HTMLElement {
     this._render();
   }
 
-  _toggleNativeMenu() {
-    this.dispatchEvent(new CustomEvent("hass-toggle-menu", {
-      bubbles: true,
-      composed: true,
-    }));
-  }
-
   _showCurrentMonth() {
     this._defaultViewApplied = false;
     this._currentMonthRequested = true;
@@ -308,8 +301,10 @@ class BudgetManagerPanel extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
       <div class="app ${this._loading ? "is-loading" : ""}">
-        ${this._renderHeader()}
-        <main>${body}</main>
+        <ha-top-app-bar-fixed ${this._narrow ? "narrow" : ""}>
+          ${this._renderHeader()}
+          <main>${body}</main>
+        </ha-top-app-bar-fixed>
         <div id="modal-root"></div>
         <div id="toast" role="status"></div>
       </div>`;
@@ -318,24 +313,19 @@ class BudgetManagerPanel extends HTMLElement {
 
   _renderHeader() {
     if (!this._state) {
-      return `<header><div class="header-leading">${this._narrow ? `<button class="native-menu-button" data-action="native-menu" aria-label="Open Home Assistant menu" title="Open Home Assistant menu"><span aria-hidden="true"></span></button>` : ""}<div class="brand"><span class="logo">€</span><div><h1>Budget Manager</h1><p>Local Home Assistant budget</p></div></div></div></header>`;
+      return `<div slot="title" class="native-title"><strong>Budget Manager</strong><small>Local Home Assistant budget</small></div>`;
     }
     return `
-      <header class="${this._month ? "month-header" : "plan-header"}">
-        <div class="header-leading">
-          ${this._narrow ? `<button class="native-menu-button" data-action="native-menu" aria-label="Open Home Assistant menu" title="Open Home Assistant menu"><span aria-hidden="true"></span></button>` : ""}
-          <div class="brand">
-            <span class="logo">€</span>
-            <div><h1>Budget Manager</h1><p>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</p></div>
-          </div>
-        </div>
-        <div class="header-actions">
-          ${this._month ? `<button class="quiet" data-action="back-year">← Plan</button>` : ""}
-          ${this._canEdit ? `<button class="quiet" data-action="settings">Settings</button>` : ""}
+      <div slot="title" class="native-title">
+        <strong>Budget Manager</strong>
+        <small>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</small>
+      </div>
+      <div slot="actionItems" class="header-actions ${this._month ? "month-header" : "plan-header"}">
+          ${this._month ? `<button class="app-bar-button" data-action="back-year">← Plan</button>` : ""}
+          ${this._canEdit ? `<button class="app-bar-button settings-action" data-action="settings">Settings</button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
-          <button class="quiet" data-action="refresh" title="Refresh">↻</button>
-        </div>
-      </header>`;
+          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh">↻</button>
+      </div>`;
   }
 
   _renderYear() {
@@ -581,7 +571,6 @@ class BudgetManagerPanel extends HTMLElement {
   async _handleAction(event) {
     const button = event.currentTarget;
     const action = button.dataset.action;
-    if (action === "native-menu") return this._toggleNativeMenu();
     if (action === "refresh") return this._load();
     if (action === "back-year") { this._month = null; return this._render(); }
     if (action === "prev-year") return this._load(this._year - 1);
@@ -1305,13 +1294,12 @@ class BudgetManagerPanel extends HTMLElement {
 
   _styles() {
     return `
-      :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --blue: #3976a8; --red: #a64a42; --amber: #a36d00; display:block; min-height:100%; overflow-x:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
+      :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --blue: #3976a8; --red: #a64a42; --amber: #a36d00; display:block; height:100vh; height:100dvh; overflow:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
       * { box-sizing:border-box; } [hidden] { display:none !important; } button, input, select, textarea { font:inherit; } button { color:inherit; }
-      .app { min-height:100vh; overflow-x:hidden; } .app.is-loading { cursor:progress; }
-      header { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:18px clamp(18px,4vw,54px); background:color-mix(in srgb, var(--surface) 94%, transparent); border-bottom:1px solid var(--line); backdrop-filter:blur(16px); }
-      .header-leading,.brand { display:flex; align-items:center; min-width:0; }.header-leading { gap:7px; }.brand { gap:13px; }.logo { width:43px; height:43px; display:grid; place-items:center; flex:0 0 43px; border-radius:13px; background:var(--green); color:white; font-size:24px; font-weight:700; box-shadow:0 8px 18px rgba(52,120,90,.24); }.native-menu-button { position:relative; width:43px; height:43px; flex:0 0 43px; border-radius:50%; background:transparent; }.native-menu-button:hover { background:var(--line); }.native-menu-button span,.native-menu-button span::before,.native-menu-button span::after { position:absolute; left:11px; width:21px; height:2px; border-radius:999px; background:currentColor; content:""; }.native-menu-button span { top:20px; }.native-menu-button span::before { top:-7px; left:0; }.native-menu-button span::after { top:7px; left:0; }
-      h1,h2,p { margin:0; } h1 { font-size:20px; line-height:1.1; } .brand p, .section-title p, .updated { color:var(--muted); font-size:12px; margin-top:4px; }
-      .header-actions,.toolbar-actions { display:flex; align-items:center; gap:9px; }.read-only { padding:7px 10px; border-radius:999px; background:var(--line); color:var(--muted); font-size:12px; }
+      .app,ha-top-app-bar-fixed { height:100%; overflow:hidden; } .app.is-loading { cursor:progress; }
+      .native-title { min-width:0; display:grid; gap:2px; line-height:1.1; }.native-title strong,.native-title small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.native-title strong { font-size:17px; }.native-title small { font-size:11px; font-weight:400; opacity:.78; }
+      h1,h2,p { margin:0; } h1 { font-size:20px; line-height:1.1; } .section-title p, .updated { color:var(--muted); font-size:12px; margin-top:4px; }
+      .header-actions,.toolbar-actions { display:flex; align-items:center; gap:3px; }.app-bar-button { min-height:40px; padding:0 12px; border-radius:var(--ha-border-radius-button,10px); background:transparent; color:inherit; font-weight:650; }.app-bar-button:hover { background:rgba(255,255,255,.12); }.refresh-action { min-width:40px; padding:0; font-size:20px; }.read-only { padding:7px 10px; border-radius:999px; background:rgba(255,255,255,.14); color:inherit; font-size:12px; }
       main { max-width:1500px; margin:0 auto; padding:28px clamp(16px,4vw,54px) 70px; }
       button { border:0; cursor:pointer; }.quiet,.primary,.danger-button { border-radius:10px; padding:10px 14px; font-weight:650; }.quiet { background:var(--surface); border:1px solid var(--line); }.quiet:hover { border-color:var(--green); }.primary { background:var(--green); color:#fff; box-shadow:0 5px 14px rgba(52,120,90,.2); }.danger-button { color:var(--red); background:transparent; border:1px solid color-mix(in srgb, var(--red) 35%, transparent); }
       .year-toolbar,.month-toolbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:22px; }.year-switcher { display:flex; align-items:center; gap:8px; }.icon-button,.year-button { height:46px; border-radius:12px; background:var(--surface); border:1px solid var(--line); }.icon-button { width:46px; font-size:26px; }.year-button { min-width:150px; padding:0 22px; font-size:20px; font-weight:750; }
@@ -1329,8 +1317,8 @@ class BudgetManagerPanel extends HTMLElement {
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }.review-notice.care-estimate-notice { border-color:color-mix(in srgb,var(--blue) 62%,var(--line)); background:color-mix(in srgb,var(--blue) 13%,var(--surface)); color:var(--ink); }.review-notice.care-estimate-notice span { color:var(--muted); }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-      @media (max-width:700px) { header { padding:13px 15px; }.brand p { display:none; } h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
-      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header [data-action="settings"],.header-actions [data-action="refresh"] { display:none; } }
+      @media (max-width:700px) { h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
+      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; } }
     `;
   }
 }
