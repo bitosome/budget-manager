@@ -27,6 +27,7 @@ from .estonian_payroll import (
     normalize_income_calculation,
 )
 from .const import (
+    DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
     DEFAULT_CYCLE_END_DAY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
     DEFAULT_DAILY_YELLOW_THRESHOLD,
@@ -126,9 +127,16 @@ class BudgetManager:
                     item.setdefault("dynamic", True)
                 else:
                     item.setdefault("dynamic", False)
+                item.setdefault("automatic_savings", False)
+                item.setdefault("assignee_user_id", None)
+                item.setdefault("reminder_time", None)
                 migrated_items.append(item)
             month["items"] = migrated_items
-        self._data["schema_version"] = 8
+        if settings.get(
+            "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
+        ):
+            self._ensure_automatic_savings_for_all_months()
+        self._data["schema_version"] = 10
         await self._async_rebuild_all_care_leave_effects()
         await self._store.async_save(self._data)
 
@@ -196,6 +204,91 @@ class BudgetManager:
         )
         return payload
 
+    def _ensure_automatic_savings_for_month(self, month: dict[str, Any]) -> None:
+        """Ensure a month contains exactly one system-managed savings transfer."""
+        savings = [
+            item
+            for item in month.get("items", [])
+            if item.get("kind") == KIND_SAVINGS
+        ]
+        automatic = next(
+            (item for item in savings if item.get("automatic_savings")), None
+        )
+        if automatic is None:
+            automatic = next(
+                (
+                    item
+                    for item in savings
+                    if item.get("status", STATUS_PENDING) == STATUS_PENDING
+                    and item.get("name", "").strip().casefold() == "savings"
+                ),
+                None,
+            )
+        if automatic is None:
+            automatic = next(
+                (
+                    item
+                    for item in savings
+                    if item.get("status", STATUS_PENDING) == STATUS_PENDING
+                ),
+                None,
+            )
+        if automatic is None:
+            automatic = next(iter(savings), None)
+        if automatic is None:
+            automatic = normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": KIND_SAVINGS,
+                    "amount": 0,
+                    "status": STATUS_PENDING,
+                    "recurrence": RECURRENCE_SINGLE,
+                    "dynamic": True,
+                    "automatic_savings": True,
+                }
+            )
+            month.setdefault("items", []).append(automatic)
+            savings.append(automatic)
+
+        for item in savings:
+            is_automatic = item is automatic
+            item["automatic_savings"] = is_automatic
+            item["dynamic"] = is_automatic
+            if not is_automatic:
+                continue
+            item["name"] = "Savings"
+            item["due_day"] = None
+            item["category"] = ""
+            item["special"] = False
+            item["special_label"] = ""
+            item["notes"] = ""
+            item["series_id"] = None
+            item["recurrence"] = RECURRENCE_SINGLE
+            item["recurrence_end"] = None
+            if item.get("status", STATUS_PENDING) == STATUS_PENDING:
+                item["amount"] = 0.0
+
+    def _ensure_automatic_savings_for_all_months(self) -> None:
+        """Ensure every stored month has its automatic savings transfer."""
+        for month in self._data.get("months", {}).values():
+            self._ensure_automatic_savings_for_month(month)
+
+    def _freeze_automatic_savings(self) -> None:
+        """Convert calculated transfers to fixed values when automation is disabled."""
+        for month in self._data.get("months", {}).values():
+            summary = calculate_month(
+                month, settings=self._data.get("settings"), today=self.today()
+            )
+            for item in month.get("items", []):
+                if not item.get("automatic_savings"):
+                    continue
+                if item.get("status", STATUS_PENDING) == STATUS_PENDING:
+                    item["amount"] = summary["effective_amounts"].get(
+                        item["id"], item.get("amount", 0)
+                    )
+                item["automatic_savings"] = False
+                item["dynamic"] = False
+
     def export_data(self) -> dict[str, Any]:
         """Return the complete budget as a portable JSON document."""
         return export_data_document(self._data)
@@ -211,6 +304,8 @@ class BudgetManager:
             previous = self._data
             self._data = imported
             try:
+                if self._data["settings"].get("automatic_savings_enabled", False):
+                    self._ensure_automatic_savings_for_all_months()
                 await self._async_rebuild_all_care_leave_effects()
                 await self._async_commit()
             except Exception:
@@ -256,12 +351,30 @@ class BudgetManager:
                 settings.get("cycle_end_day", DEFAULT_CYCLE_END_DAY),
             )
         )
+        automatic_savings_enabled = changes.get(
+            "automatic_savings_enabled",
+            settings.get(
+                "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
+            ),
+        )
+        if not isinstance(automatic_savings_enabled, bool):
+            raise BudgetValidationError(
+                "Automatic savings setting must be true or false"
+            )
         async with self._lock:
+            was_automatic = settings.get(
+                "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
+            )
             settings["cycle_end_day"] = cycle_end_day
             settings["daily_green_threshold"] = green
             settings["daily_yellow_threshold"] = yellow
             settings["savings_target_threshold"] = savings_target
             settings["savings_floor_threshold"] = savings_floor
+            if was_automatic and not automatic_savings_enabled:
+                self._freeze_automatic_savings()
+            settings["automatic_savings_enabled"] = automatic_savings_enabled
+            if automatic_savings_enabled:
+                self._ensure_automatic_savings_for_all_months()
             for month_key, month in self._data["months"].items():
                 month["payday"] = default_payday(month_key, cycle_end_day)
             await self._async_commit()
@@ -303,6 +416,8 @@ class BudgetManager:
                 await self._async_refresh_calculated_income(month, target)
             else:
                 month = make_month(target, cycle_end_day=cycle_end_day)
+            if self._data["settings"].get("automatic_savings_enabled", False):
+                self._ensure_automatic_savings_for_month(month)
             self._data["months"][target] = month
             await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
@@ -353,6 +468,8 @@ class BudgetManager:
                         source=source,
                         cycle_end_day=cycle_end_day,
                     )
+            if self._data["settings"].get("automatic_savings_enabled", False):
+                self._ensure_automatic_savings_for_all_months()
             await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return calculate_year(
@@ -406,9 +523,23 @@ class BudgetManager:
                 raise BudgetValidationError(
                     "Automatic Tervisekassa income is managed from its care-leave period"
                 )
+            if existing and existing.get("automatic_savings"):
+                raise BudgetValidationError(
+                    "Automatic savings is managed from Budget settings"
+                )
             if raw.get("generated_type"):
                 raise BudgetValidationError(
                     "Generated income cannot be created or edited directly"
+                )
+            if (
+                (
+                    raw.get("kind") == KIND_SAVINGS
+                    or (existing is not None and existing.get("kind") == KIND_SAVINGS)
+                )
+                and self._data["settings"].get("automatic_savings_enabled", False)
+            ):
+                raise BudgetValidationError(
+                    "Turn off automatic savings before managing savings manually"
                 )
 
             if existing and scope == "future" and existing.get("series_id"):
@@ -472,6 +603,8 @@ class BudgetManager:
                     occurrence["paid_at"] = None
                     target_month["items"].append(occurrence)
                 normalized["series_id"] = series_id
+            if self._data["settings"].get("automatic_savings_enabled", False):
+                self._ensure_automatic_savings_for_all_months()
             await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return deepcopy(normalized)
@@ -969,6 +1102,12 @@ class BudgetManager:
                 raise BudgetValidationError(
                     "Delete the source care-leave period to remove this automatic income"
                 )
+            if item.get("kind") == KIND_SAVINGS and self._data["settings"].get(
+                "automatic_savings_enabled", False
+            ):
+                raise BudgetValidationError(
+                    "Automatic savings is managed from Budget settings"
+                )
             if scope == "future" and item.get("series_id"):
                 series_id = item["series_id"]
                 for key, stored_month in self._data["months"].items():
@@ -1031,6 +1170,8 @@ class BudgetManager:
                 item["amount"] = summary["effective_amounts"].get(
                     item["id"], item.get("amount", 0)
                 )
+            if item.get("automatic_savings") and status == STATUS_PENDING:
+                item["amount"] = 0.0
             item["status"] = status
             item["paid_at"] = (
                 datetime.now(timezone.utc).isoformat()

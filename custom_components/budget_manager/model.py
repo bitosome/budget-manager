@@ -20,6 +20,7 @@ from .estonian_care_leave import (
 from .estonian_payroll import EstonianPayrollError, normalize_income_calculation
 
 from .const import (
+    DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
     DEFAULT_CYCLE_END_DAY,
     DEFAULT_CURRENCY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
@@ -43,6 +44,7 @@ from .const import (
 )
 
 MONTH_PATTERN = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 class BudgetValidationError(ValueError):
@@ -139,7 +141,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 8,
+        "schema_version": 10,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -149,6 +151,7 @@ def empty_data() -> dict[str, Any]:
             "daily_yellow_threshold": DEFAULT_DAILY_YELLOW_THRESHOLD,
             "savings_target_threshold": DEFAULT_SAVINGS_TARGET_THRESHOLD,
             "savings_floor_threshold": DEFAULT_SAVINGS_FLOOR_THRESHOLD,
+            "automatic_savings_enabled": DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
         },
         "months": {},
     }
@@ -197,6 +200,16 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         raise BudgetValidationError("Due day must be a number") from err
     if due_day is not None and not 1 <= due_day <= 31:
         raise BudgetValidationError("Due day must be between 1 and 31")
+
+    assignee_user_id = str(raw.get("assignee_user_id") or "").strip() or None
+    reminder_time_raw = str(raw.get("reminder_time") or "").strip()
+    reminder_time = reminder_time_raw or ("09:00" if assignee_user_id else None)
+    if reminder_time is not None and TIME_PATTERN.fullmatch(reminder_time) is None:
+        raise BudgetValidationError("Reminder time must use HH:MM format")
+    if assignee_user_id and due_day is None:
+        raise BudgetValidationError("Assigned items require a due day")
+    if not assignee_user_id:
+        reminder_time = None
 
     recurrence = str(raw.get("recurrence", RECURRENCE_SINGLE))
     if recurrence not in VALID_RECURRENCES:
@@ -264,6 +277,8 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         "kind": kind,
         "amount": 0.0 if is_care_leave else money(raw.get("amount", 0)),
         "due_day": None if is_care_leave else due_day,
+        "assignee_user_id": None if is_care_leave else assignee_user_id,
+        "reminder_time": None if is_care_leave else reminder_time,
         "status": status,
         "paid_at": paid_at,
         "category": str(raw.get("category", "")).strip(),
@@ -285,6 +300,9 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         "generated_type": generated_type,
         "generated": dict(generated) if isinstance(generated, dict) else None,
         "dynamic": bool(raw.get("dynamic", kind == KIND_SAVINGS))
+        if kind == KIND_SAVINGS
+        else False,
+        "automatic_savings": bool(raw.get("automatic_savings", False))
         if kind == KIND_SAVINGS
         else False,
     }
@@ -435,6 +453,12 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
                 "savings_floor_threshold", defaults["savings_floor_threshold"]
             )
         ),
+        "automatic_savings_enabled": bool(
+            settings.get(
+                "automatic_savings_enabled",
+                defaults["automatic_savings_enabled"],
+            )
+        ),
     }
     months: dict[str, Any] = {}
     for month_key, raw_month in sorted(data.get("months", {}).items()):
@@ -477,6 +501,11 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
     )
     currency = str(raw_settings.get("currency", defaults["currency"])).strip()
     locale = str(raw_settings.get("locale", defaults["locale"])).strip()
+    automatic_savings_enabled = raw_settings.get(
+        "automatic_savings_enabled", defaults["automatic_savings_enabled"]
+    )
+    if not isinstance(automatic_savings_enabled, bool):
+        raise BudgetValidationError("Automatic savings setting must be true or false")
     if not currency or not locale:
         raise BudgetValidationError("Currency and locale cannot be empty")
 
@@ -496,6 +525,7 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
             "daily_yellow_threshold": yellow,
             "savings_target_threshold": savings_target,
             "savings_floor_threshold": savings_floor,
+            "automatic_savings_enabled": automatic_savings_enabled,
         }
     )
     seen_item_ids: set[str] = set()
@@ -599,17 +629,37 @@ def calculate_month(
         for item in items
         if item.get("kind") == KIND_SAVINGS and item_is_open(item)
     ]
-    fixed_savings = sum(
-        money(item.get("amount", 0))
+    automatic_savings_items = [
+        item
         for item in open_savings
-        if not item.get("dynamic", True)
-    )
-    dynamic_savings_items = [
-        item for item in open_savings if item.get("dynamic", True)
+        if item.get("automatic_savings", False)
+        and (settings or {}).get(
+            "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
+        )
     ]
-    baseline_dynamic_savings = sum(
-        money(item.get("amount", 0)) for item in dynamic_savings_items
-    )
+    if automatic_savings_items:
+        # A system-managed savings transfer is calculated from zero so it
+        # leaves the configured target amount available per cycle day. Every
+        # other savings entry is treated as a fixed transfer in this mode.
+        dynamic_savings_items = automatic_savings_items
+        fixed_savings = sum(
+            money(item.get("amount", 0))
+            for item in open_savings
+            if not item.get("automatic_savings", False)
+        )
+        baseline_dynamic_savings = 0.0
+    else:
+        fixed_savings = sum(
+            money(item.get("amount", 0))
+            for item in open_savings
+            if not item.get("dynamic", True)
+        )
+        dynamic_savings_items = [
+            item for item in open_savings if item.get("dynamic", True)
+        ]
+        baseline_dynamic_savings = sum(
+            money(item.get("amount", 0)) for item in dynamic_savings_items
+        )
     before_dynamic_savings = (
         account_balance + expected_income - unpaid_expenses - fixed_savings
     )
@@ -785,9 +835,38 @@ def event_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
                     "special": bool(item.get("special", False)),
                     "special_label": item.get("special_label", ""),
                     "notes": item.get("notes", ""),
+                    "assignee_user_id": item.get("assignee_user_id"),
+                    "reminder_time": item.get("reminder_time"),
                 }
             )
     return events
+
+
+def event_summary(row: dict[str, Any], currency_symbol: str = "€") -> str:
+    """Return the concise signed calendar and reminder title for an item."""
+    sign = "+" if row.get("kind") == KIND_INCOME else "-"
+    return f"{row['name']} {sign}{currency_symbol}{money(row.get('amount', 0)):.2f}"
+
+
+def reminder_rows(data: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """Return pending reminders due at this exact local minute."""
+    current_minute = now.replace(second=0, microsecond=0)
+    reminders: list[dict[str, Any]] = []
+    for row in event_rows(data):
+        reminder_time = row.get("reminder_time")
+        if (
+            row.get("status") != STATUS_PENDING
+            or not row.get("assignee_user_id")
+            or not reminder_time
+            or row["date"] != current_minute.date()
+        ):
+            continue
+        hour, minute = (int(value) for value in reminder_time.split(":"))
+        first_reminder = current_minute.replace(hour=hour, minute=minute)
+        elapsed_minutes = int((current_minute - first_reminder).total_seconds() / 60)
+        if elapsed_minutes >= 0 and elapsed_minutes % 60 == 0:
+            reminders.append(row)
+    return reminders
 
 
 def next_day(value: date) -> date:

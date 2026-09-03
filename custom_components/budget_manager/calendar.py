@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STATUS_PENDING
 from .entity import BudgetEntity
 from .manager import BudgetManager
-from .model import event_rows, next_day
+from .model import event_rows, event_summary, next_day
 
 PARALLEL_UPDATES = 0
 
@@ -65,17 +66,21 @@ class BudgetCalendar(BudgetEntity, CalendarEntity):
         ]
 
     def _as_event(self, row: dict) -> CalendarEvent:
-        prefix = {
-            "income": "Income",
-            "expense": "Expense",
-            "savings": "Savings transfer",
-        }.get(row["kind"], "Budget")
-        if row["special"]:
-            prefix = row["special_label"] or "Renewal"
+        start: date | datetime = row["date"]
+        end: date | datetime = next_day(row["date"])
+        if row.get("reminder_time"):
+            hour, minute = (
+                int(value) for value in row["reminder_time"].split(":")
+            )
+            timezone = dt_util.get_time_zone(self.manager.hass.config.time_zone)
+            start = datetime.combine(
+                row["date"], time(hour=hour, minute=minute), tzinfo=timezone
+            )
+            end = start + timedelta(hours=1)
         return CalendarEvent(
-            start=row["date"],
-            end=next_day(row["date"]),
-            summary=f"{prefix}: {row['name']} · €{row['amount']:.2f}",
+            start=start,
+            end=end,
+            summary=event_summary(row),
             description=f"Status: {row['status']}\n{row['notes']}".strip(),
             uid=row["uid"],
         )

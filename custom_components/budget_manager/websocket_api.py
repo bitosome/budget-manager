@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant, callback
 from .const import DOMAIN
 from .manager import BudgetManager
 from .model import BudgetValidationError
+from .notifications import async_notification_assignees
 
 
 def _manager(hass: HomeAssistant) -> BudgetManager:
@@ -46,6 +47,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_delete_item,
         ws_set_item_status,
         ws_estonian_working_hours,
+        ws_notification_assignees,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -88,6 +90,20 @@ async def ws_estonian_working_hours(
         _error(connection, msg, err)
     else:
         connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/notification_assignees"}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_notification_assignees(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return HA users with an enabled Mobile App notification target."""
+    connection.send_result(msg["id"], await async_notification_assignees(hass))
 
 
 @websocket_api.websocket_command(

@@ -3,6 +3,7 @@ class BudgetManagerPanel extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._state = null;
+    this._assignees = [];
     this._year = new Date().getFullYear();
     this._month = null;
     this._loading = false;
@@ -140,11 +141,14 @@ class BudgetManagerPanel extends HTMLElement {
     this._error = null;
     this._render();
     try {
-      const state = await this._hass.callWS({
-        type: "budget_manager/get_state",
-        year,
-      });
+      const [state, assignees] = await Promise.all([
+        this._hass.callWS({ type: "budget_manager/get_state", year }),
+        this._canEdit
+          ? this._hass.callWS({ type: "budget_manager/notification_assignees" }).catch(() => [])
+          : Promise.resolve([]),
+      ]);
       this._state = state;
+      this._assignees = assignees;
       this._year = state.selected_year;
       if (this._month && !state.months[this._month]) this._month = null;
       if (!this._defaultViewApplied || this._currentMonthRequested) {
@@ -255,6 +259,16 @@ class BudgetManagerPanel extends HTMLElement {
       hour: "numeric", minute: "2-digit", hourCycle, timeZone,
     }).format(date);
     return `${this._formatDate(localDate)} ${time}`;
+  }
+
+  _formatClockTime(value) {
+    const match = String(value || "").match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!match) return String(value || "");
+    const locale = this._hass?.locale || {};
+    const hourCycle = locale.time_format === "12" ? "h12" : locale.time_format === "24" ? "h23" : undefined;
+    return new Intl.DateTimeFormat(locale.time_format === "system" ? undefined : this._localeLanguage(), {
+      hour: "numeric", minute: "2-digit", hourCycle, timeZone: "UTC",
+    }).format(new Date(Date.UTC(2000, 0, 1, Number(match[1]), Number(match[2]))));
   }
 
   _esc(value) {
@@ -456,13 +470,18 @@ class BudgetManagerPanel extends HTMLElement {
 
   _matrixCell(row, item, monthKey) {
     if (this._matrixEditMode && this._canEdit) {
+      if (row.kind === "savings" && this._state.settings.automatic_savings_enabled) {
+        if (!item) return `<td class="blank" title="Create this budget month to calculate savings">—</td>`;
+        const effective = Number(item.effective_amount ?? item.amount);
+        return `<td class="matrix-edit-cell automatic-savings-cell" data-action="open-month" data-month="${monthKey}" title="Automatic savings is managed from Settings">${item.automatic_savings ? "Auto" : "Fixed"}<small>${this._money(effective)}</small></td>`;
+      }
       const value = item ? Number(item.amount).toFixed(2) : "";
       return `<td class="matrix-edit-cell ${item?.needs_review ? "needs-review" : ""}"><input class="matrix-amount-input" type="number" min="0" step="0.01" inputmode="decimal" value="${value}" data-action="edit-matrix-value" data-month="${monthKey}" data-item-id="${item?.id || ""}" data-name="${this._esc(row.name)}" data-kind="${row.kind}" data-original="${value}" aria-label="${this._esc(row.name)}, ${this._monthLabel(monthKey)} amount"></td>`;
     }
     if (!item) return `<td class="blank">—</td>`;
     const complete = item.status === "paid" || item.status === "received";
     const effective = Number(item.effective_amount ?? item.amount);
-    const adjusted = item.kind === "savings" && item.dynamic && effective !== Number(item.amount);
+    const adjusted = item.kind === "savings" && item.dynamic && !item.automatic_savings && effective !== Number(item.amount);
     return `<td class="${item.special ? "special" : ""} ${complete ? "complete" : ""}" data-action="open-month" data-month="${monthKey}">
       ${complete ? "✓ " : ""}${this._money(effective)}
       ${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}
@@ -512,6 +531,10 @@ class BudgetManagerPanel extends HTMLElement {
     return Number(item.effective_amount ?? item.amount ?? 0) > 0;
   }
 
+  _assigneeName(userId) {
+    return this._assignees.find((user) => user.id === userId)?.name || "Unavailable user";
+  }
+
   _renderItem(item, kind) {
     if (item.expense_type === "child_care_leave") {
       const care = item.care_leave || {};
@@ -531,7 +554,7 @@ class BudgetManagerPanel extends HTMLElement {
     const complete = item.status === "paid" || item.status === "received";
     const actionLabel = kind === "income" ? (complete ? "Received" : "Mark received") : (complete ? "Paid" : "Mark paid");
     const amount = item.effective_amount ?? item.amount;
-    const adjusted = kind === "savings" && item.dynamic && Number(amount) !== Number(item.amount);
+    const adjusted = kind === "savings" && item.dynamic && !item.automatic_savings && Number(amount) !== Number(item.amount);
     const generatedPeriod = item.generated_type === "tervisekassa_care_benefit"
       ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
       : "";
@@ -539,19 +562,20 @@ class BudgetManagerPanel extends HTMLElement {
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Auto</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.automatic_savings ? `<span class="badge savings-badge">Calculated</span>` : item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Adjusted</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
+          ${item.assignee_user_id ? ` · assigned to ${this._esc(this._assigneeName(item.assignee_user_id))} · reminders from ${this._esc(this._formatClockTime(item.reminder_time || "09:00"))}` : ""}
           ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(this._formatDate(item.recurrence_end))}` : " · one-time"}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
           ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
-          ${item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
+          ${item.automatic_savings ? ` · calculated to leave ${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
       <strong class="item-amount">${this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
-      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
+      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
     </article>`;
   }
 
@@ -672,7 +696,9 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._field("Green from, EUR/day", "daily_green_threshold", settings.daily_green_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Yellow from, EUR/day", "daily_yellow_threshold", settings.daily_yellow_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
-    <fieldset class="settings-group"><legend>Automatic savings calculation</legend><p class="form-help">Planned savings is preserved inside this range. Above the target, the excess is added to savings. Below the floor, savings is reduced as far as possible.</p><div class="two-col">
+    <fieldset class="settings-group"><legend>Automatic savings calculation</legend>
+      <label class="check"><input type="checkbox" name="automatic_savings_enabled" ${settings.automatic_savings_enabled ? "checked" : ""}><span>Calculate and create the monthly Savings transfer automatically</span></label>
+      <p class="form-help">When enabled, every budget month has one system-managed Savings entry. Its value is calculated to leave the target amount per cycle day. An existing Savings entry is reused where possible. Check it after transferring the money from the main account; it then stops affecting daily money. Turn this off before managing savings values manually.</p><div class="two-col">
       ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
@@ -692,6 +718,7 @@ class BudgetManagerPanel extends HTMLElement {
           cycle_end_day: cycleEndDay,
           daily_green_threshold: green,
           daily_yellow_threshold: yellow,
+          automatic_savings_enabled: form.has("automatic_savings_enabled"),
           savings_target_threshold: savingsTarget,
           savings_floor_threshold: savingsFloor,
         },
@@ -837,6 +864,7 @@ class BudgetManagerPanel extends HTMLElement {
   _openItemEditor(itemId = null) {
     const month = this._state.months[this._month];
     const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
+    if (item?.automatic_savings) return;
     if (item?.expense_type === "child_care_leave") return this._openCareLeaveEditor(item);
     if (item?.generated_type === "tervisekassa_care_benefit") return;
     const incomeCalculation = item?.income_calculation || null;
@@ -846,10 +874,14 @@ class BudgetManagerPanel extends HTMLElement {
     const workPeriod = incomeCalculation?.work_period || "budget_month";
     const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
     const careIncomeOptions = this._careIncomeOptions();
+    const unavailableAssignee = item?.assignee_user_id && !this._assignees.some((user) => user.id === item.assignee_user_id)
+      ? `<option value="${this._esc(item.assignee_user_id)}" selected>Unavailable user</option>`
+      : "";
+    const assigneeOptions = this._assignees.map((user) => `<option value="${this._esc(user.id)}" ${item?.assignee_user_id === user.id ? "selected" : ""}>${this._esc(user.name)} · ${user.device_count} ${user.device_count === 1 ? "device" : "devices"}</option>`).join("");
     const fields = `
       ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
       <div class="two-col">
-        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option><option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option><option value="care_leave">Child-care sick leave</option></select></label>
+        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option>${!this._state.settings.automatic_savings_enabled || item?.kind === "savings" ? `<option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option>` : ""}<option value="care_leave">Child-care sick leave</option></select></label>
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
@@ -893,6 +925,14 @@ class BudgetManagerPanel extends HTMLElement {
         ${this._field("Due day", "due_day", item?.due_day ?? "", "number", "min=1 max=31")}
         ${this._field("Category", "category", item?.category ?? "")}
       </div>
+      <fieldset class="settings-group" id="assignment-settings">
+        <legend>Assignment and reminders</legend>
+        <div class="two-col">
+          <label><span>Assignee</span><select name="assignee_user_id" id="item-assignee"><option value="">Unassigned</option>${unavailableAssignee}${assigneeOptions}</select></label>
+          ${this._field("First reminder", "reminder_time", item?.reminder_time || "09:00", "time", "step=60")}
+        </div>
+        <p class="form-help">Only Home Assistant users with an active Mobile App notification device are listed. A notification is repeated hourly until the item is completed or the due day ends.</p>
+      </fieldset>
       <div class="two-col">
         <label><span>Recurrence</span><select name="recurrence" id="recurrence"><option value="single" ${!item || item.recurrence === "single" ? "selected" : ""}>One-time</option><option value="monthly" ${item?.recurrence === "monthly" ? "selected" : ""}>Every month</option><option value="yearly" ${item?.recurrence === "yearly" ? "selected" : ""}>Every year</option></select></label>
         ${this._field("Recurrence end", "recurrence_end", item?.recurrence_end || endDefault, "date", "")}
@@ -917,6 +957,9 @@ class BudgetManagerPanel extends HTMLElement {
       const linkedIncome = isCareLeave ? this._state.months[careLink[0]]?.items.find((entry) => entry.id === careLink[1]) : null;
       const basisMode = String(form.get("benefit_basis_mode") || "estimated_hourly");
       const actualPreviousYearIncome = Number(form.get("actual_previous_year_income") || 0);
+      const assigneeUserId = isCareLeave ? "" : String(form.get("assignee_user_id") || "");
+      const dueDay = isCareLeave ? null : (form.get("due_day") ? Number(form.get("due_day")) : null);
+      if (assigneeUserId && !dueDay) throw new Error("Choose a due day for assigned reminders.");
       if (isCareLeave && basisMode === "actual_previous_year_income" && (!Number.isFinite(actualPreviousYearIncome) || actualPreviousYearIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
       await this._hass.callWS({
         type: "budget_manager/upsert_item",
@@ -925,7 +968,9 @@ class BudgetManagerPanel extends HTMLElement {
         item: {
           ...(item || {}),
           name: form.get("name"), kind, amount: isCareLeave ? 0 : Number(form.get("amount")),
-          due_day: isCareLeave ? null : (form.get("due_day") ? Number(form.get("due_day")) : null),
+          due_day: dueDay,
+          assignee_user_id: assigneeUserId || null,
+          reminder_time: assigneeUserId ? String(form.get("reminder_time") || "09:00") : null,
           category: isCareLeave ? "Care leave" : form.get("category"), recurrence: isCareLeave ? "single" : recurrence,
           recurrence_end: isCareLeave || recurrence === "single" ? null : form.get("recurrence_end"),
           expense_type: isCareLeave ? "child_care_leave" : "standard",
@@ -990,6 +1035,17 @@ class BudgetManagerPanel extends HTMLElement {
     const refreshWorkingHours = modal.root.querySelector("#refresh-working-hours");
     const fundedPensionJoined = modal.root.querySelector("#funded-pension-joined");
     const payrollPreview = modal.root.querySelector("#payroll-preview");
+    const assignmentSettings = modal.root.querySelector("#assignment-settings");
+    const assigneeSelect = modal.root.querySelector("#item-assignee");
+    const reminderTimeInput = modal.root.querySelector('[name="reminder_time"]');
+    const dueDayInput = modal.root.querySelector('[name="due_day"]');
+    const updateAssignment = () => {
+      const enabled = kindSelect.value !== "care_leave" && Boolean(assigneeSelect.value);
+      reminderTimeInput.disabled = !enabled;
+      reminderTimeInput.required = enabled;
+      dueDayInput.required = enabled;
+    };
+    assigneeSelect.onchange = updateAssignment;
     workingHoursStatus.dataset.workingDays = String(incomeCalculation?.working_days || 0);
     workingHoursStatus.dataset.calendarSource = incomeCalculation?.calendar_source || (automaticWorkingHours ? "pending" : "manual");
     workingHoursStatus.dataset.workingTimeMonth = incomeCalculation?.working_time_month || this._incomeWorkingMonth(this._month, workPeriod);
@@ -1056,6 +1112,8 @@ class BudgetManagerPanel extends HTMLElement {
       dynamicSavingsHelp.hidden = !savingsVisible;
       incomeSection.hidden = kindSelect.value !== "income";
       careLeaveSection.hidden = !careVisible;
+      assignmentSettings.hidden = careVisible;
+      assignmentSettings.querySelectorAll("input,select").forEach((control) => { control.disabled = careVisible; });
       careLeaveSection.querySelectorAll("input,select").forEach((control) => { control.disabled = !careVisible; });
       if (careIncomeLink) careIncomeLink.required = careVisible;
       recurrenceSelect.closest(".two-col").hidden = careVisible;
@@ -1082,6 +1140,7 @@ class BudgetManagerPanel extends HTMLElement {
       updateEnd();
       updatePayrollControls();
       updateCareBasis();
+      updateAssignment();
     };
     const updateCareBasis = () => {
       const actual = benefitBasisMode.value === "actual_previous_year_income";
@@ -1307,7 +1366,7 @@ class BudgetManagerPanel extends HTMLElement {
       .matrix-title-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:pointer; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }

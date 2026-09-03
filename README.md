@@ -20,17 +20,19 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Estonian child-care sick leave can be linked to an automatic hourly salary. Calendar periods reduce only scheduled work hours, while each period creates a separate estimated Tervisekassa income in the salary-payment month.
 - Care-benefit planning can approximate the previous year's income from the linked hourly salary or use a user-entered previous-year social-taxable income total.
 - Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
-- Add, edit, and delete income, expenditures, and savings.
+- Add, edit, and delete income, expenditures, and manual savings when automatic savings is disabled.
 - One-time, monthly, and yearly items.
 - Required end date for recurring items.
 - Edit/delete one occurrence or the current-and-future unpaid series.
 - Mark expenses paid and income received without automatically changing the manual account balance.
+- Optional assignment to a Home Assistant user with an active Companion App notification device. Assigned items require a due day, become timed calendar events, and send targeted reminders from the chosen time every hour until completion or the end of that day.
+- Concise signed calendar titles such as `Apple iCloud -€9.99` and `Валя +€1873.24`.
 - Create a blank month or copy any specific month.
 - Create a blank 12-month year or copy any specific year.
 - Renewal/special-month highlighting.
 - Configurable budget-cycle end day (the 2nd of the following month by default).
 - Independently configurable per-day RAG colors (green from €45/day and yellow from €40/day by default).
-- Fixed or automatic savings with its own target and floor (default €45–€40/day). The planned savings amount is preserved inside that range, then adjusted only enough to return to it.
+- Optional global automatic savings creates one dedicated Savings transfer in every month and calculates it without manual amounts. Savings remains separate from regular expenditures.
 - Native Home Assistant summary sensors, account-balance number entity, calendar, and actions.
 - Empty, zero-input installation with no bundled household or financial data.
 - Versioned JSON import and export from the Budget panel for backups and moving data between installations.
@@ -53,15 +55,13 @@ The day divisor is the smaller of the number of days in the budget month and the
 
 Marking an item paid or received only changes its status. It does not change the account balance, which remains a deliberate manual input.
 
-Automatic savings starts from the configured monthly amount. Its target and floor are separate from the RAG color thresholds. It stays unchanged inside its acceptable daily-money range and is clamped to the nearest boundary outside it:
+When automatic savings is enabled in Settings, Budget Manager creates one system-managed Savings entry in every existing and newly created month. Its value starts from zero and takes only the money above the configured daily target:
 
 ```text
-minimum savings = max(0, money before savings - savings target × relevant days)
-maximum savings = max(0, money before savings - savings floor × relevant days)
-automatic savings = clamp(planned savings, minimum savings, maximum savings)
+automatic savings = max(0, money before savings - savings target × relevant days)
 ```
 
-When an automatic savings item is marked paid/transferred, its calculated amount is frozen on that occurrence and it stops reducing the daily allowance. Update the account balance manually after the transfer, as with any other real account movement.
+The target is separate from the RAG color thresholds. If insufficient money is available, automatic savings becomes zero rather than forcing the daily amount below its existing level. Automatic Savings cannot be edited in the month or plan-table editors. When marked paid/transferred, its calculated amount is frozen on that occurrence and it stops reducing the daily allowance. Update the account balance manually after the transfer, as with any other real account movement. Reopening the transfer returns it to automatic calculation.
 
 ### Estonian hourly income
 
@@ -115,7 +115,13 @@ Add `https://github.com/bitosome/budget-manager` to HACS as an **Integration**, 
 
 Entity IDs may receive a numeric suffix when an entity with the same ID already exists.
 
-The cycle-end day, RAG colors, and automatic-savings limits can be changed from the Budget panel or from **Settings → Devices & services → Budget Manager → Configure**. RAG status is communicated by the color of daily-money pills and cells rather than repeated threshold text in the month and plan views.
+### Assigned reminders
+
+The optional **Assignee** field lists active Home Assistant users that currently have at least one enabled Mobile App notification entity. Selecting an assignee requires a due day and enables a first-reminder time, which defaults to 09:00. The calendar occurrence uses that time in Home Assistant's configured timezone. Budget Manager sends a Companion App push at that time and hourly afterward through the end of the due day, stopping as soon as the item is marked paid or received. If a user has multiple registered notification devices, all of them receive the reminder.
+
+Home Assistant persistent notifications are instance-wide rather than user-targeted, so assigned reminders intentionally use the user's Mobile App notification entities.
+
+The cycle-end day, RAG colors, automatic-savings switch, and savings limits can be changed from the Budget panel or from **Settings → Devices & services → Budget Manager → Configure**. RAG status is communicated by the color of daily-money pills and cells rather than repeated threshold text in the month and plan views.
 
 ## Import and export
 
@@ -136,7 +142,7 @@ The sidebar panel is the primary CRUD interface. Actions are intended for automa
 
 Copying a month or year:
 
-- Copies names, amounts, due days, categories, item notes, and special/renewal markers.
+- Copies names, amounts, due days, assignees, reminder times, categories, item notes, and special/renewal markers.
 - Recalculates copied Estonian hourly income using the target month's working hours.
 - Resets account balances.
 - Resets paid/received/skipped items to pending.

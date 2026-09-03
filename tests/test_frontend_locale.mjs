@@ -43,6 +43,7 @@ assert.equal(
   "29.8.2026 – 31.8.2026",
 );
 assert.match(panel._formatDateTime("2026-01-01T22:30:00Z"), /2\.1\.2026/);
+assert.match(panel._formatClockTime("09:30"), /^0?9:30$/);
 assert.match(panel._monthLabel("2026-08"), /august 2026/i);
 
 panel._hass.locale = {
@@ -52,3 +53,4 @@ panel._hass.locale = {
   time_zone: "server",
 };
 assert.equal(panel._formatDate("2026-08-29"), "29/8/2026");
+assert.match(panel._formatClockTime("21:30"), /^9:30\s?PM$/i);

@@ -12,6 +12,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
     DEFAULT_CYCLE_END_DAY,
     DEFAULT_DAILY_GREEN_THRESHOLD,
     DEFAULT_DAILY_YELLOW_THRESHOLD,
@@ -26,6 +27,7 @@ CONF_GREEN = "daily_green_threshold"
 CONF_YELLOW = "daily_yellow_threshold"
 CONF_SAVINGS_TARGET = "savings_target_threshold"
 CONF_SAVINGS_FLOOR = "savings_floor_threshold"
+CONF_AUTOMATIC_SAVINGS = "automatic_savings_enabled"
 
 
 class BudgetManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -104,6 +106,13 @@ class BudgetOptionsFlow(OptionsFlow):
                         CONF_SAVINGS_FLOOR, DEFAULT_SAVINGS_FLOOR_THRESHOLD
                     ),
                 ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    CONF_AUTOMATIC_SAVINGS,
+                    default=current.get(
+                        CONF_AUTOMATIC_SAVINGS,
+                        DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
+                    ),
+                ): bool,
             }
         )
         return self.async_show_form(

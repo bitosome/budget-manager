@@ -15,13 +15,14 @@
     "step": {
       "init": {
         "title": "Budget calculation settings",
-        "description": "Set the monthly cycle end, RAG color limits, and the acceptable daily-money range used to adjust automatic savings.",
+        "description": "Set the monthly cycle end, RAG color limits, and automatic savings calculation.",
         "data": {
           "cycle_end_day": "Cycle ends on this day of the following month",
           "daily_green_threshold": "Green from (EUR/day)",
           "daily_yellow_threshold": "Yellow from (EUR/day)",
           "savings_target_threshold": "Savings target (EUR/day)",
-          "savings_floor_threshold": "Savings floor (EUR/day)"
+          "savings_floor_threshold": "Savings floor (EUR/day)",
+          "automatic_savings_enabled": "Create and calculate a Savings transfer in every month"
         }
       }
     },

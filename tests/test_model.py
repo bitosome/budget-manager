@@ -44,10 +44,21 @@ homeassistant = types.ModuleType("homeassistant")
 homeassistant.__path__ = []
 homeassistant_core = types.ModuleType("homeassistant.core")
 homeassistant_core.HomeAssistant = object
+homeassistant_exceptions = types.ModuleType("homeassistant.exceptions")
+homeassistant_exceptions.HomeAssistantError = Exception
 homeassistant_helpers = types.ModuleType("homeassistant.helpers")
 homeassistant_helpers.__path__ = []
 homeassistant_storage = types.ModuleType("homeassistant.helpers.storage")
 homeassistant_storage.Store = _FakeStore
+homeassistant_entity_registry = types.ModuleType(
+    "homeassistant.helpers.entity_registry"
+)
+homeassistant_entity_registry.async_get = lambda _hass: None
+homeassistant_entity_registry.async_entries_for_config_entry = (
+    lambda _registry, _entry_id: []
+)
+homeassistant_event = types.ModuleType("homeassistant.helpers.event")
+homeassistant_event.async_track_time_change = lambda *_args, **_kwargs: lambda: None
 homeassistant_aiohttp = types.ModuleType("homeassistant.helpers.aiohttp_client")
 homeassistant_aiohttp.async_get_clientsession = lambda _hass: None
 homeassistant_util = types.ModuleType("homeassistant.util")
@@ -56,13 +67,21 @@ homeassistant_util_dt = types.ModuleType("homeassistant.util.dt")
 homeassistant_util_dt.now = lambda: datetime.now().astimezone()
 sys.modules.setdefault("homeassistant", homeassistant)
 sys.modules.setdefault("homeassistant.core", homeassistant_core)
+sys.modules.setdefault("homeassistant.exceptions", homeassistant_exceptions)
 sys.modules.setdefault("homeassistant.helpers", homeassistant_helpers)
 sys.modules.setdefault("homeassistant.helpers.storage", homeassistant_storage)
+sys.modules.setdefault(
+    "homeassistant.helpers.entity_registry", homeassistant_entity_registry
+)
+sys.modules.setdefault("homeassistant.helpers.event", homeassistant_event)
 sys.modules.setdefault("homeassistant.helpers.aiohttp_client", homeassistant_aiohttp)
 sys.modules.setdefault("homeassistant.util", homeassistant_util)
 sys.modules.setdefault("homeassistant.util.dt", homeassistant_util_dt)
 
 manager_module = importlib.import_module("custom_components.budget_manager.manager")
+notification_module = importlib.import_module(
+    "custom_components.budget_manager.notifications"
+)
 calendar_module = importlib.import_module(
     "custom_components.budget_manager.estonian_calendar"
 )
@@ -267,6 +286,36 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(summary["daily_allowance"], 45)
         self.assertEqual(summary["rag"], "green")
 
+    def test_automatic_savings_ignores_stored_amount_and_hits_target(self) -> None:
+        month = model.make_month("2026-09")
+        month["payday"] = "2026-09-30"
+        month["account_balance"] = 2000
+        month["items"] = [
+            model.normalize_item(
+                {"name": "Bills", "kind": "expense", "amount": 500}
+            ),
+            model.normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": "savings",
+                    "amount": 999,
+                    "automatic_savings": True,
+                }
+            ),
+        ]
+        summary = model.calculate_month(
+            month,
+            settings={
+                "automatic_savings_enabled": True,
+                "savings_target_threshold": 45,
+                "savings_floor_threshold": 40,
+            },
+            today=date(2026, 9, 1),
+        )
+        savings = month["items"][1]
+        self.assertEqual(summary["effective_amounts"][savings["id"]], 150)
+        self.assertEqual(summary["daily_allowance"], 45)
+
     def test_rag_uses_the_displayed_daily_allowance_at_threshold(self) -> None:
         month = model.make_month("2027-03")
         month["account_balance"] = 2207.03
@@ -470,10 +519,117 @@ class BudgetModelTests(unittest.TestCase):
     def test_due_day_is_clamped(self) -> None:
         self.assertEqual(model.due_date("2027-02", 31), date(2027, 2, 28))
 
+    def test_assigned_item_defaults_to_nine_and_requires_due_day(self) -> None:
+        item = model.normalize_item(
+            {
+                "name": "Water",
+                "kind": "expense",
+                "amount": 42,
+                "due_day": 15,
+                "assignee_user_id": "user-1",
+            }
+        )
+
+        self.assertEqual(item["assignee_user_id"], "user-1")
+        self.assertEqual(item["reminder_time"], "09:00")
+        with self.assertRaisesRegex(
+            model.BudgetValidationError, "Assigned items require a due day"
+        ):
+            model.normalize_item(
+                {
+                    "name": "Water",
+                    "kind": "expense",
+                    "amount": 42,
+                    "assignee_user_id": "user-1",
+                }
+            )
+
+    def test_reminder_time_is_validated_and_cleared_without_assignee(self) -> None:
+        unassigned = model.normalize_item(
+            {
+                "name": "Water",
+                "kind": "expense",
+                "amount": 42,
+                "due_day": 15,
+                "reminder_time": "14:30",
+            }
+        )
+        self.assertIsNone(unassigned["reminder_time"])
+        with self.assertRaisesRegex(
+            model.BudgetValidationError, "Reminder time must use HH:MM"
+        ):
+            model.normalize_item(
+                {
+                    "name": "Water",
+                    "kind": "expense",
+                    "amount": 42,
+                    "due_day": 15,
+                    "assignee_user_id": "user-1",
+                    "reminder_time": "25:00",
+                }
+            )
+
+    def test_calendar_titles_use_signed_amounts(self) -> None:
+        self.assertEqual(
+            model.event_summary(
+                {"name": "Apple iCloud", "kind": "expense", "amount": 9.99}
+            ),
+            "Apple iCloud -€9.99",
+        )
+        self.assertEqual(
+            model.event_summary(
+                {"name": "Валя", "kind": "income", "amount": 1873.24}
+            ),
+            "Валя +€1873.24",
+        )
+
+    def test_reminders_repeat_hourly_on_due_day_until_completed(self) -> None:
+        data = model.empty_data()
+        month = model.make_month("2026-09")
+        item = model.normalize_item(
+            {
+                "name": "Water",
+                "kind": "expense",
+                "amount": 42,
+                "due_day": 3,
+                "assignee_user_id": "user-1",
+                "reminder_time": "09:30",
+            }
+        )
+        month["items"].append(item)
+        data["months"]["2026-09"] = month
+
+        self.assertEqual(
+            [
+                row["uid"]
+                for row in model.reminder_rows(
+                    data, datetime(2026, 9, 3, 9, 30)
+                )
+            ],
+            [item["id"]],
+        )
+        self.assertEqual(
+            [
+                row["uid"]
+                for row in model.reminder_rows(
+                    data, datetime(2026, 9, 3, 21, 30)
+                )
+            ],
+            [item["id"]],
+        )
+        self.assertEqual(
+            model.reminder_rows(data, datetime(2026, 9, 3, 10, 0)), []
+        )
+        item["status"] = "paid"
+        self.assertEqual(
+            model.reminder_rows(data, datetime(2026, 9, 3, 22, 30)), []
+        )
+
     def test_portable_export_round_trip(self) -> None:
         data = model.empty_data()
         data["settings"]["cycle_end_day"] = 5
         data["settings"]["daily_green_threshold"] = 52
+        data["settings"]["automatic_savings_enabled"] = True
         month = model.make_month("2026-09", cycle_end_day=5)
         month["account_balance"] = 1234.56
         month["items"] = [
@@ -486,7 +642,15 @@ class BudgetModelTests(unittest.TestCase):
                     "special": True,
                     "special_label": "Annual renewal",
                 }
-            )
+            ),
+            model.normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": "savings",
+                    "amount": 0,
+                    "automatic_savings": True,
+                }
+            ),
         ]
         data["months"][month["month"]] = month
         document = model.export_data_document(data)
@@ -498,10 +662,14 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(imported["settings"]["cycle_end_day"], 5)
         self.assertEqual(imported["months"]["2026-09"]["payday"], "2026-10-05")
         self.assertEqual(imported["settings"]["daily_green_threshold"], 52)
+        self.assertTrue(imported["settings"]["automatic_savings_enabled"])
         self.assertEqual(imported["months"]["2026-09"]["account_balance"], 1234.56)
         self.assertEqual(imported["months"]["2026-09"]["items"][0]["name"], "Water")
         self.assertTrue(
             imported["months"]["2026-09"]["items"][0]["needs_review"]
+        )
+        self.assertTrue(
+            imported["months"]["2026-09"]["items"][1]["automatic_savings"]
         )
 
     def test_portable_export_preserves_hourly_income_configuration(self) -> None:
@@ -559,6 +727,59 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(len(year["months"]), 12)
         self.assertFalse(year["months"][0]["exists"])
         self.assertTrue(year["months"][8]["exists"])
+
+
+class BudgetReminderTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_coordinator_targets_user_and_deduplicates_each_minute(self) -> None:
+        data = model.empty_data()
+        month = model.make_month("2026-09")
+        item = model.normalize_item(
+            {
+                "name": "Apple iCloud",
+                "kind": "expense",
+                "amount": 9.99,
+                "due_day": 3,
+                "assignee_user_id": "user-1",
+                "reminder_time": "09:00",
+            }
+        )
+        month["items"].append(item)
+        data["months"]["2026-09"] = month
+
+        class FakeServices:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def async_call(self, *args, **kwargs) -> None:
+                self.calls.append((args, kwargs))
+
+        services = FakeServices()
+        hass = types.SimpleNamespace(services=services)
+        manager = types.SimpleNamespace(data=data)
+        coordinator = notification_module.BudgetReminderCoordinator(hass, manager)
+        original_targets = notification_module.mobile_notify_targets
+        notification_module.mobile_notify_targets = (
+            lambda _hass: {"user-1": ["notify.phone", "notify.tablet"]}
+        )
+        try:
+            now = datetime(2026, 9, 3, 9, 0)
+            await coordinator._async_check(now)
+            await coordinator._async_check(now)
+            await coordinator._async_check(datetime(2026, 9, 3, 10, 0))
+            item["status"] = "paid"
+            await coordinator._async_check(datetime(2026, 9, 3, 11, 0))
+        finally:
+            notification_module.mobile_notify_targets = original_targets
+
+        self.assertEqual(len(services.calls), 2)
+        args, kwargs = services.calls[0]
+        self.assertEqual(args[:2], ("notify", "send_message"))
+        self.assertIn("Apple iCloud -€9.99", args[2]["message"])
+        self.assertEqual(
+            kwargs["target"]["entity_id"], ["notify.phone", "notify.tablet"]
+        )
+        self.assertFalse(kwargs["blocking"])
 
 
 class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -967,6 +1188,131 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(summary["planned_savings"], 0)
         self.assertEqual(summary["daily_allowance"], 66.67)
+
+    async def test_enabling_automatic_savings_populates_every_month(self) -> None:
+        self.manager.data["months"]["2026-10"] = model.make_month("2026-10")
+        existing = model.normalize_item(
+            {"name": "My savings plan", "kind": "savings", "amount": 350}
+        )
+        self.manager.data["months"]["2026-09"]["items"] = [existing]
+
+        await self.manager.async_update_settings(
+            {"automatic_savings_enabled": True}
+        )
+
+        for month in self.manager.data["months"].values():
+            automatic = [
+                item for item in month["items"] if item.get("automatic_savings")
+            ]
+            self.assertEqual(len(automatic), 1)
+            self.assertEqual(automatic[0]["name"], "Savings")
+            self.assertEqual(automatic[0]["amount"], 0)
+            self.assertTrue(automatic[0]["dynamic"])
+
+    async def test_automatic_savings_is_created_with_new_month(self) -> None:
+        self.manager.data["settings"]["automatic_savings_enabled"] = True
+        created = await self.manager.async_create_month("2026-10")
+
+        savings = [item for item in created["items"] if item["kind"] == "savings"]
+        self.assertEqual(len(savings), 1)
+        self.assertTrue(savings[0]["automatic_savings"])
+
+    async def test_enabling_automatic_savings_reuses_transferred_savings(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        transferred = model.normalize_item(
+            {
+                "name": "Old savings",
+                "kind": "savings",
+                "amount": 300,
+                "status": "paid",
+            }
+        )
+        month["items"] = [transferred]
+
+        await self.manager.async_update_settings(
+            {"automatic_savings_enabled": True}
+        )
+
+        savings = [item for item in month["items"] if item["kind"] == "savings"]
+        self.assertEqual(len(savings), 1)
+        self.assertEqual(savings[0]["id"], transferred["id"])
+        self.assertEqual(savings[0]["amount"], 300)
+        self.assertEqual(savings[0]["status"], "paid")
+        self.assertTrue(savings[0]["automatic_savings"])
+
+    async def test_disabling_automatic_savings_freezes_calculated_amount(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        month["payday"] = "2026-09-30"
+        month["account_balance"] = 2000
+        month["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": "savings",
+                    "amount": 0,
+                    "automatic_savings": True,
+                }
+            )
+        ]
+        self.manager.data["settings"]["automatic_savings_enabled"] = True
+        self.manager.today = lambda: date(2026, 9, 1)
+
+        await self.manager.async_update_settings(
+            {"automatic_savings_enabled": False}
+        )
+
+        savings = month["items"][0]
+        self.assertEqual(savings["amount"], 650)
+        self.assertFalse(savings["automatic_savings"])
+        self.assertFalse(savings["dynamic"])
+
+    async def test_transferred_automatic_savings_stops_affecting_daily_money(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        month["payday"] = "2026-09-30"
+        month["account_balance"] = 2000
+        savings = model.normalize_item(
+            {
+                "name": "Savings",
+                "kind": "savings",
+                "amount": 0,
+                "automatic_savings": True,
+            }
+        )
+        month["items"] = [savings]
+        self.manager.data["settings"]["automatic_savings_enabled"] = True
+        self.manager.today = lambda: date(2026, 9, 1)
+
+        await self.manager.async_set_item_status("2026-09", savings["id"], "paid")
+        self.assertEqual(savings["amount"], 650)
+        paid_summary = model.calculate_month(
+            month,
+            settings=self.manager.data["settings"],
+            today=date(2026, 9, 1),
+        )
+        self.assertEqual(paid_summary["planned_savings"], 0)
+        self.assertEqual(paid_summary["daily_allowance"], 66.67)
+
+        await self.manager.async_set_item_status(
+            "2026-09", savings["id"], "pending"
+        )
+        self.assertEqual(savings["amount"], 0)
+        reopened_summary = model.calculate_month(
+            month,
+            settings=self.manager.data["settings"],
+            today=date(2026, 9, 1),
+        )
+        self.assertEqual(reopened_summary["planned_savings"], 650)
+        self.assertEqual(reopened_summary["daily_allowance"], 45)
+
+    async def test_automatic_savings_cannot_be_manually_created(self) -> None:
+        self.manager.data["settings"]["automatic_savings_enabled"] = True
+        with self.assertRaisesRegex(
+            model.BudgetValidationError, "Turn off automatic savings"
+        ):
+            await self.manager.async_upsert_item(
+                "2026-09",
+                {"name": "Manual savings", "kind": "savings", "amount": 100},
+            )
 
     async def test_existing_storage_migrates_savings_without_reconfiguration(self) -> None:
         manager = manager_module.BudgetManager(object(), "old")
