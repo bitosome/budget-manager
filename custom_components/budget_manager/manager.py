@@ -34,6 +34,8 @@ from .const import (
     DEFAULT_SAVINGS_FLOOR_THRESHOLD,
     DEFAULT_SAVINGS_TARGET_THRESHOLD,
     KIND_SAVINGS,
+    KIND_EXPENSE,
+    KIND_INCOME,
     RECURRENCE_SINGLE,
     STATUS_PAID,
     STATUS_PENDING,
@@ -58,6 +60,7 @@ from .model import (
     normalize_item,
     normalize_cycle_end_day,
     normalize_import_document,
+    normalize_plan_item_order,
     normalize_savings_thresholds,
     normalize_thresholds,
     validate_month_key,
@@ -97,6 +100,12 @@ class BudgetManager:
             cycle_end_day = DEFAULT_CYCLE_END_DAY
         settings["cycle_end_day"] = cycle_end_day
         settings["configured"] = True
+        try:
+            settings["plan_item_order"] = normalize_plan_item_order(
+                settings.get("plan_item_order")
+            )
+        except BudgetValidationError:
+            settings["plan_item_order"] = {KIND_INCOME: [], KIND_EXPENSE: []}
         self._data.setdefault("months", {})
         for month_key, month in self._data["months"].items():
             month.pop("note", None)
@@ -136,7 +145,7 @@ class BudgetManager:
             "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
         ):
             self._ensure_automatic_savings_for_all_months()
-        self._data["schema_version"] = 10
+        self._data["schema_version"] = 11
         await self._async_rebuild_all_care_leave_effects()
         await self._store.async_save(self._data)
 
@@ -378,6 +387,46 @@ class BudgetManager:
             for month_key, month in self._data["months"].items():
                 month["payday"] = default_payday(month_key, cycle_end_day)
             await self._async_commit()
+
+    async def async_update_plan_item_order(
+        self, kind: str, ordered_names: list[str]
+    ) -> dict[str, list[str]]:
+        """Persist a custom matrix order while preserving currently hidden rows."""
+        if kind not in {KIND_INCOME, KIND_EXPENSE}:
+            raise BudgetValidationError("Only income and expenditure can be reordered")
+        requested = normalize_plan_item_order({kind: ordered_names})[kind]
+        async with self._lock:
+            available = {
+                str(item.get("name", "")).strip()
+                for month in self._data.get("months", {}).values()
+                for item in month.get("items", [])
+                if item.get("kind") == kind
+                and item.get("expense_type") != CARE_LEAVE_TYPE
+                and item.get("generated_type") != GENERATED_BENEFIT_TYPE
+                and str(item.get("name", "")).strip()
+            }
+            unknown = [name for name in requested if name not in available]
+            if unknown:
+                raise BudgetValidationError(
+                    f"Cannot reorder unknown {kind}: {unknown[0]}"
+                )
+            current = normalize_plan_item_order(
+                self._data["settings"].get("plan_item_order")
+            )
+            complete = [name for name in current[kind] if name in available]
+            complete.extend(sorted(available - set(complete), key=str.casefold))
+            requested_set = set(requested)
+            positions = [
+                index for index, name in enumerate(complete) if name in requested_set
+            ]
+            if len(positions) != len(requested):
+                raise BudgetValidationError("Plan item order is incomplete")
+            for index, name in zip(positions, requested, strict=True):
+                complete[index] = name
+            current[kind] = complete
+            self._data["settings"]["plan_item_order"] = current
+            await self._async_commit()
+            return deepcopy(current)
 
     def current_month(self) -> dict[str, Any] | None:
         """Return the current or nearest budget month."""

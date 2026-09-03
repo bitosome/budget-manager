@@ -25,10 +25,11 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Required end date for recurring items.
 - Edit/delete one occurrence or the current-and-future unpaid series.
 - Mark expenses paid and income received without automatically changing the manual account balance.
-- Optional assignment to a Home Assistant user with an active Companion App notification device. Assigned items require a due day, become timed calendar events, and send targeted reminders from the chosen time every hour until completion or the end of that day.
+- Optional assignment to a Home Assistant user with an active Companion App notification device. Assigned items require a due day and send targeted reminders from the chosen time every hour until completion or the end of that day, while calendar entries remain all-day events.
 - Concise signed calendar titles such as `Apple iCloud -€9.99` and `Валя +€1873.24`.
 - Create a blank month or copy any specific month.
 - Create a blank 12-month year or copy any specific year.
+- Reorder income and expenditure rows directly in plan edit mode; the custom order is stored with the budget and included in JSON exports.
 - Renewal/special-month highlighting.
 - Configurable budget-cycle end day (the 2nd of the following month by default).
 - Independently configurable per-day RAG colors (green from €45/day and yellow from €40/day by default).
@@ -117,7 +118,7 @@ Entity IDs may receive a numeric suffix when an entity with the same ID already 
 
 ### Assigned reminders
 
-The optional **Assignee** field lists active Home Assistant users that currently have at least one enabled Mobile App notification entity. Selecting an assignee requires a due day and enables a first-reminder time, which defaults to 09:00. The calendar occurrence uses that time in Home Assistant's configured timezone. Budget Manager sends a Companion App push at that time and hourly afterward through the end of the due day, stopping as soon as the item is marked paid or received. If a user has multiple registered notification devices, all of them receive the reminder.
+The optional **Assignee** field lists active Home Assistant users that currently have at least one enabled Mobile App notification entity. Selecting an assignee requires a due day and enables a first-reminder time, which defaults to 09:00. Calendar occurrences remain all-day events; the reminder time is independent calendar-notification metadata interpreted in Home Assistant's configured timezone. Budget Manager sends a Companion App push at that time and hourly afterward through the end of the due day, stopping as soon as the item is marked paid or received. If a user has multiple registered notification devices, all of them receive the reminder.
 
 Home Assistant persistent notifications are instance-wide rather than user-targeted, so assigned reminders intentionally use the user's Mobile App notification entities.
 

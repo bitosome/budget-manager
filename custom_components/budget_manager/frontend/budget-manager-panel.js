@@ -414,7 +414,12 @@ class BudgetManagerPanel extends HTMLElement {
           : "";
         const rowName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
         const key = `${item.kind}:${rowName}`;
-        if (!rows.has(key)) rows.set(key, { name: rowName, kind: item.kind, months: {} });
+        if (!rows.has(key)) rows.set(key, {
+          name: rowName,
+          orderName: item.generated_type ? null : item.name,
+          kind: item.kind,
+          months: {},
+        });
         rows.get(key).months[monthKey] = item;
       }
     }
@@ -423,7 +428,20 @@ class BudgetManagerPanel extends HTMLElement {
       { kind: "expense", label: "Expenditures" },
       { kind: "savings", label: "Savings" },
     ];
-    const ordered = [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const planOrder = this._state.settings.plan_item_order || {};
+    const kindRank = { income: 0, expense: 1, savings: 2 };
+    const ordered = [...rows.values()].sort((a, b) => {
+      if (a.kind !== b.kind) return (kindRank[a.kind] ?? 9) - (kindRank[b.kind] ?? 9);
+      const custom = planOrder[a.kind] || [];
+      const left = a.orderName ? custom.indexOf(a.orderName) : -1;
+      const right = b.orderName ? custom.indexOf(b.orderName) : -1;
+      if (left >= 0 || right >= 0) {
+        if (left < 0) return 1;
+        if (right < 0) return -1;
+        if (left !== right) return left - right;
+      }
+      return a.name.localeCompare(b.name);
+    });
     if (!ordered.length) {
       if (this._showPastMonths) return "";
       return `<section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">${sectionTitle}<div class="empty">No planned items in the visible months.</div></section>`;
@@ -431,17 +449,26 @@ class BudgetManagerPanel extends HTMLElement {
     const renderGroup = (group) => {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
-      return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="kind-dot"></span>${group.label}</th></tr>${groupRows.map((row) => `<tr class="${row.kind}">
-        <th title="${this._esc(row.name)}"><span class="kind-dot"></span><span>${this._esc(row.name)}</span></th>
+      const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
+      return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="kind-dot"></span>${group.label}</th></tr>${groupRows.map((row) => {
+        const orderIndex = reorderable.indexOf(row);
+        const controls = this._matrixEditMode && orderIndex >= 0
+          ? `<span class="plan-order-controls"><button type="button" data-action="move-plan-row" data-direction="up" title="Move up" aria-label="Move ${this._esc(row.name)} up" ${orderIndex === 0 ? "disabled" : ""}>↑</button><button type="button" data-action="move-plan-row" data-direction="down" title="Move down" aria-label="Move ${this._esc(row.name)} down" ${orderIndex === reorderable.length - 1 ? "disabled" : ""}>↓</button></span>`
+          : "";
+        const orderData = orderIndex >= 0 ? ` data-plan-kind="${row.kind}" data-plan-order-name="${this._esc(row.orderName)}"` : "";
+        return `<tr class="${row.kind}"${orderData}>
+        <th title="${this._esc(row.name)}"><div class="plan-row-heading"><span class="plan-row-label"><span class="kind-dot"></span>${this._esc(row.name)}</span>${controls}</div></th>
         ${months.map((key) => this._matrixCell(row, row.months[key], key)).join("")}
-      </tr>`).join("")}`;
+      </tr>`;
+      }).join("")}`;
     };
+    const itemColumnWidth = this._matrixEditMode ? 255 : 205;
     return `
       <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
         ${sectionTitle}
         <div class="matrix-wrap">
-          <table class="matrix" style="min-width:${205 + months.length * 74}px">
-            <colgroup><col class="item-column">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
+          <table class="matrix" style="min-width:${itemColumnWidth + months.length * 74}px">
+            <colgroup><col class="item-column" style="width:${itemColumnWidth}px">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
               <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
               <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${this._esc(this._monthName(key, "short"))}</th>`).join("")}</tr>
@@ -464,7 +491,8 @@ class BudgetManagerPanel extends HTMLElement {
     return `<tr class="summary-row ${tone}"><th>${label}</th>${months.map((monthKey) => {
       const summary = this._state.months[monthKey]?.summary;
       if (!summary) return `<td class="blank">—</td>`;
-      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}" data-action="open-month" data-month="${monthKey}">${this._money(summary[key])}</td>`;
+      const navigation = this._matrixEditMode ? "" : ` data-action="open-month" data-month="${monthKey}"`;
+      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}"${navigation}>${this._money(summary[key])}</td>`;
     }).join("")}</tr>`;
   }
 
@@ -473,7 +501,7 @@ class BudgetManagerPanel extends HTMLElement {
       if (row.kind === "savings" && this._state.settings.automatic_savings_enabled) {
         if (!item) return `<td class="blank" title="Create this budget month to calculate savings">—</td>`;
         const effective = Number(item.effective_amount ?? item.amount);
-        return `<td class="matrix-edit-cell automatic-savings-cell" data-action="open-month" data-month="${monthKey}" title="Automatic savings is managed from Settings">${item.automatic_savings ? "Auto" : "Fixed"}<small>${this._money(effective)}</small></td>`;
+        return `<td class="matrix-edit-cell automatic-savings-cell" title="Automatic savings is managed from Settings">${item.automatic_savings ? "Auto" : "Fixed"}<small>${this._money(effective)}</small></td>`;
       }
       const value = item ? Number(item.amount).toFixed(2) : "";
       return `<td class="matrix-edit-cell ${item?.needs_review ? "needs-review" : ""}"><input class="matrix-amount-input" type="number" min="0" step="0.01" inputmode="decimal" value="${value}" data-action="edit-matrix-value" data-month="${monthKey}" data-item-id="${item?.id || ""}" data-name="${this._esc(row.name)}" data-kind="${row.kind}" data-original="${value}" aria-label="${this._esc(row.name)}, ${this._monthLabel(monthKey)} amount"></td>`;
@@ -483,7 +511,7 @@ class BudgetManagerPanel extends HTMLElement {
     const effective = Number(item.effective_amount ?? item.amount);
     const adjusted = item.kind === "savings" && item.dynamic && !item.automatic_savings && effective !== Number(item.amount);
     return `<td class="${item.special ? "special" : ""} ${complete ? "complete" : ""}" data-action="open-month" data-month="${monthKey}">
-      ${complete ? "✓ " : ""}${this._money(effective)}
+      ${this._money(effective)}
       ${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}
       ${item.special ? `<small>${this._esc(item.special_label || "Renewal")}</small>` : ""}
     </td>`;
@@ -603,8 +631,13 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
     if (action === "toggle-past-months") return this._togglePastMonths();
     if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
+    if (action === "move-plan-row") return this._movePlanRow(button);
     if (action === "settings") return this._openSettings();
-    if (action === "open-month") { this._month = button.dataset.month; return this._render(); }
+    if (action === "open-month") {
+      if (this._matrixEditMode && button.closest(".matrix")) return;
+      this._month = button.dataset.month;
+      return this._render();
+    }
     if (action === "create-month") return this._openCreateMonth();
     if (action === "create-specific-month") return this._openCreateMonth(button.dataset.month);
     if (action === "create-year") return this._openCreateYear();
@@ -632,9 +665,6 @@ class BudgetManagerPanel extends HTMLElement {
     const existing = input.dataset.itemId
       ? month?.items.find((item) => item.id === input.dataset.itemId)
       : null;
-    const wrap = this.shadowRoot.querySelector(".matrix-wrap");
-    const scrollLeft = wrap?.scrollLeft || 0;
-    const scrollTop = wrap?.scrollTop || 0;
     input.dataset.saving = "true";
     input.disabled = true;
     try {
@@ -646,7 +676,7 @@ class BudgetManagerPanel extends HTMLElement {
           overwrite: false,
         });
       }
-      await this._hass.callWS({
+      const saved = await this._hass.callWS({
         type: "budget_manager/upsert_item",
         month: monthKey,
         scope: "this",
@@ -672,18 +702,58 @@ class BudgetManagerPanel extends HTMLElement {
           needs_review: true,
         },
       });
-      await this._load(this._year);
-      const updatedWrap = this.shadowRoot.querySelector(".matrix-wrap");
-      if (updatedWrap) {
-        updatedWrap.scrollLeft = scrollLeft;
-        updatedWrap.scrollTop = scrollTop;
-      }
+      const state = await this._hass.callWS({
+        type: "budget_manager/get_state",
+        year: this._year,
+      });
+      this._state = state;
+      this._year = state.selected_year;
+      input.dataset.itemId = saved.id;
+      input.dataset.original = amount.toFixed(2);
+      input.value = amount.toFixed(2);
+      input.disabled = false;
+      input.dataset.saving = "false";
       this._showMessage("Value saved. Review its details in the month view.");
     } catch (err) {
       input.disabled = false;
       input.dataset.saving = "false";
       input.value = original;
       this._showError(err);
+    }
+  }
+
+  async _movePlanRow(button) {
+    const row = button.closest("tr[data-plan-kind][data-plan-order-name]");
+    if (!row) return;
+    const kind = row.dataset.planKind;
+    const rows = [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
+    const index = rows.indexOf(row);
+    const targetIndex = button.dataset.direction === "up" ? index - 1 : index + 1;
+    if (index < 0 || targetIndex < 0 || targetIndex >= rows.length) return;
+    const target = rows[targetIndex];
+    const orderedNames = rows.map((entry) => entry.dataset.planOrderName);
+    [orderedNames[index], orderedNames[targetIndex]] = [orderedNames[targetIndex], orderedNames[index]];
+    const controls = rows.flatMap((entry) => [...entry.querySelectorAll(".plan-order-controls button")]);
+    controls.forEach((control) => { control.disabled = true; });
+    try {
+      const planItemOrder = await this._hass.callWS({
+        type: "budget_manager/update_plan_item_order",
+        kind,
+        names: orderedNames,
+      });
+      this._state.settings.plan_item_order = planItemOrder;
+      if (button.dataset.direction === "up") row.parentNode.insertBefore(row, target);
+      else row.parentNode.insertBefore(target, row);
+    } catch (err) {
+      this._showError(err);
+    } finally {
+      const updatedRows = [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
+      updatedRows.forEach((entry, rowIndex) => {
+        const up = entry.querySelector('[data-direction="up"]');
+        const down = entry.querySelector('[data-direction="down"]');
+        if (up) up.disabled = rowIndex === 0;
+        if (down) down.disabled = rowIndex === updatedRows.length - 1;
+      });
     }
   }
 
@@ -1366,7 +1436,7 @@ class BudgetManagerPanel extends HTMLElement {
       .matrix-title-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:pointer; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-order-controls { display:inline-flex; flex:0 0 auto; gap:3px; }.plan-order-controls button { width:23px; height:23px; padding:0; border:1px solid var(--line); border-radius:6px; background:var(--page); color:var(--muted); font-weight:800; }.plan-order-controls button:hover:not(:disabled) { color:var(--green); border-color:var(--green); }.plan-order-controls button:disabled { opacity:.3; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }

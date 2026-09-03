@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import datetime
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STATUS_PENDING
 from .entity import BudgetEntity
@@ -66,20 +65,9 @@ class BudgetCalendar(BudgetEntity, CalendarEntity):
         ]
 
     def _as_event(self, row: dict) -> CalendarEvent:
-        start: date | datetime = row["date"]
-        end: date | datetime = next_day(row["date"])
-        if row.get("reminder_time"):
-            hour, minute = (
-                int(value) for value in row["reminder_time"].split(":")
-            )
-            timezone = dt_util.get_time_zone(self.manager.hass.config.time_zone)
-            start = datetime.combine(
-                row["date"], time(hour=hour, minute=minute), tzinfo=timezone
-            )
-            end = start + timedelta(hours=1)
         return CalendarEvent(
-            start=start,
-            end=end,
+            start=row["date"],
+            end=next_day(row["date"]),
             summary=event_summary(row),
             description=f"Status: {row['status']}\n{row['notes']}".strip(),
             uid=row["uid"],

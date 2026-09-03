@@ -630,6 +630,10 @@ class BudgetModelTests(unittest.TestCase):
         data["settings"]["cycle_end_day"] = 5
         data["settings"]["daily_green_threshold"] = 52
         data["settings"]["automatic_savings_enabled"] = True
+        data["settings"]["plan_item_order"] = {
+            "income": ["Salary", "Benefit"],
+            "expense": ["Housing", "Water"],
+        }
         month = model.make_month("2026-09", cycle_end_day=5)
         month["account_balance"] = 1234.56
         month["items"] = [
@@ -663,6 +667,13 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(imported["months"]["2026-09"]["payday"], "2026-10-05")
         self.assertEqual(imported["settings"]["daily_green_threshold"], 52)
         self.assertTrue(imported["settings"]["automatic_savings_enabled"])
+        self.assertEqual(
+            imported["settings"]["plan_item_order"],
+            {
+                "income": ["Salary", "Benefit"],
+                "expense": ["Housing", "Water"],
+            },
+        )
         self.assertEqual(imported["months"]["2026-09"]["account_balance"], 1234.56)
         self.assertEqual(imported["months"]["2026-09"]["items"][0]["name"], "Water")
         self.assertTrue(
@@ -809,6 +820,35 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len({item["series_id"] for item in occurrences}), 1)
         self.assertEqual(len({item["id"] for item in occurrences}), 3)
+
+    async def test_plan_item_order_is_persistent_and_preserves_hidden_rows(self) -> None:
+        september = self.manager.data["months"]["2026-09"]
+        september["items"] = [
+            model.normalize_item({"name": name, "kind": "income", "amount": 1})
+            for name in ("Alpha", "Bravo", "Charlie", "Delta")
+        ]
+
+        result = await self.manager.async_update_plan_item_order(
+            "income", ["Charlie", "Alpha"]
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "income": ["Charlie", "Bravo", "Alpha", "Delta"],
+                "expense": [],
+            },
+        )
+        self.assertEqual(
+            self.manager.data["settings"]["plan_item_order"]["income"],
+            ["Charlie", "Bravo", "Alpha", "Delta"],
+        )
+
+    async def test_plan_item_order_rejects_unknown_rows(self) -> None:
+        with self.assertRaisesRegex(model.BudgetValidationError, "unknown income"):
+            await self.manager.async_update_plan_item_order(
+                "income", ["Not in the plan"]
+            )
 
     async def test_recurring_hourly_income_uses_each_months_working_hours(self) -> None:
         class FakeCalendar:

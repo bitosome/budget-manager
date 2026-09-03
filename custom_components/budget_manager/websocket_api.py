@@ -37,6 +37,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_export_data,
         ws_import_data,
         ws_update_settings,
+        ws_update_plan_item_order,
         ws_create_month,
         ws_create_year,
         ws_update_month,
@@ -198,6 +199,31 @@ async def ws_update_settings(
         _error(connection, msg, err)
     else:
         connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/update_plan_item_order",
+        vol.Required("kind"): vol.In(["income", "expense"]),
+        vol.Required("names"): [str],
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_update_plan_item_order(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Persist the custom plan-matrix order for one financial kind."""
+    try:
+        result = await _manager(hass).async_update_plan_item_order(
+            msg["kind"], msg["names"]
+        )
+    except BudgetValidationError as err:
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(

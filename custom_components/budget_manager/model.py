@@ -141,7 +141,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 10,
+        "schema_version": 11,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -152,6 +152,7 @@ def empty_data() -> dict[str, Any]:
             "savings_target_threshold": DEFAULT_SAVINGS_TARGET_THRESHOLD,
             "savings_floor_threshold": DEFAULT_SAVINGS_FLOOR_THRESHOLD,
             "automatic_savings_enabled": DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
+            "plan_item_order": {KIND_INCOME: [], KIND_EXPENSE: []},
         },
         "months": {},
     }
@@ -423,6 +424,33 @@ def normalize_savings_thresholds(
     return target, floor
 
 
+def normalize_plan_item_order(value: Any) -> dict[str, list[str]]:
+    """Validate the persistent custom row order for the plan matrix."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise BudgetValidationError("Plan item order must be an object")
+    result: dict[str, list[str]] = {}
+    for kind in (KIND_INCOME, KIND_EXPENSE):
+        raw_names = value.get(kind, [])
+        if not isinstance(raw_names, list):
+            raise BudgetValidationError(f"Plan {kind} order must be a list")
+        if len(raw_names) > 2000:
+            raise BudgetValidationError("Plan item order cannot exceed 2000 entries")
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw_name in raw_names:
+            name = str(raw_name).strip()
+            if not name:
+                raise BudgetValidationError("Plan item order names cannot be empty")
+            if name in seen:
+                raise BudgetValidationError("Plan item order names must be unique")
+            seen.add(name)
+            names.append(name)
+        result[kind] = names
+    return result
+
+
 def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
     """Return a portable, versioned Budget Manager JSON document."""
     defaults = empty_data()["settings"]
@@ -458,6 +486,9 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
                 "automatic_savings_enabled",
                 defaults["automatic_savings_enabled"],
             )
+        ),
+        "plan_item_order": normalize_plan_item_order(
+            settings.get("plan_item_order", defaults["plan_item_order"])
         ),
     }
     months: dict[str, Any] = {}
@@ -506,6 +537,9 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
     )
     if not isinstance(automatic_savings_enabled, bool):
         raise BudgetValidationError("Automatic savings setting must be true or false")
+    plan_item_order = normalize_plan_item_order(
+        raw_settings.get("plan_item_order", defaults["plan_item_order"])
+    )
     if not currency or not locale:
         raise BudgetValidationError("Currency and locale cannot be empty")
 
@@ -526,6 +560,7 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
             "savings_target_threshold": savings_target,
             "savings_floor_threshold": savings_floor,
             "automatic_savings_enabled": automatic_savings_enabled,
+            "plan_item_order": plan_item_order,
         }
     )
     seen_item_ids: set[str] = set()
