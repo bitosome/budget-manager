@@ -38,6 +38,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_import_data,
         ws_update_settings,
         ws_update_plan_item_order,
+        ws_rename_plan_item,
         ws_create_month,
         ws_create_year,
         ws_update_month,
@@ -219,6 +220,32 @@ async def ws_update_plan_item_order(
     try:
         result = await _manager(hass).async_update_plan_item_order(
             msg["kind"], msg["names"]
+        )
+    except BudgetValidationError as err:
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/rename_plan_item",
+        vol.Required("kind"): vol.In(["income", "expense"]),
+        vol.Required("old_name"): str,
+        vol.Required("new_name"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_rename_plan_item(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Rename a shared plan row across every stored month."""
+    try:
+        result = await _manager(hass).async_rename_plan_item(
+            msg["kind"], msg["old_name"], msg["new_name"]
         )
     except BudgetValidationError as err:
         _error(connection, msg, err)

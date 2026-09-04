@@ -850,6 +850,101 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
                 "income", ["Not in the plan"]
             )
 
+    async def test_plan_item_rename_updates_every_month_and_custom_order(self) -> None:
+        self.manager.data["months"]["2026-10"] = model.make_month("2026-10")
+        self.manager.data["months"]["2026-11"] = model.make_month("2026-11")
+        september = model.normalize_item(
+            {"name": "Water", "kind": "expense", "amount": 50, "status": "paid"}
+        )
+        october = model.normalize_item(
+            {"name": "Water", "kind": "expense", "amount": 65}
+        )
+        november = model.normalize_item(
+            {"name": "Utilities", "kind": "expense", "amount": 80}
+        )
+        self.manager.data["months"]["2026-09"]["items"] = [september]
+        self.manager.data["months"]["2026-10"]["items"] = [october]
+        self.manager.data["months"]["2026-11"]["items"] = [november]
+        self.manager.data["settings"]["plan_item_order"]["expense"] = [
+            "Water",
+            "Utilities",
+            "Food",
+        ]
+
+        result = await self.manager.async_rename_plan_item(
+            "expense", "Water", "Utilities"
+        )
+
+        self.assertEqual(result["updated_count"], 2)
+        self.assertEqual(
+            [
+                self.manager.data["months"][key]["items"][0]["name"]
+                for key in ("2026-09", "2026-10", "2026-11")
+            ],
+            ["Utilities", "Utilities", "Utilities"],
+        )
+        self.assertEqual(september["amount"], 50)
+        self.assertEqual(september["status"], "paid")
+        self.assertEqual(october["amount"], 65)
+        self.assertEqual(
+            self.manager.data["settings"]["plan_item_order"]["expense"],
+            ["Utilities", "Food"],
+        )
+
+    async def test_plan_item_rename_rejects_same_month_collision(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        month["items"] = [
+            model.normalize_item(
+                {"name": "Water", "kind": "expense", "amount": 50}
+            ),
+            model.normalize_item(
+                {"name": "Utilities", "kind": "expense", "amount": 80}
+            ),
+        ]
+
+        with self.assertRaisesRegex(
+            model.BudgetValidationError, "already exists in 2026-09"
+        ):
+            await self.manager.async_rename_plan_item(
+                "expense", "Water", "Utilities"
+            )
+        self.assertEqual(
+            [item["name"] for item in month["items"]], ["Water", "Utilities"]
+        )
+
+    async def test_month_editor_name_change_renames_shared_plan_item(self) -> None:
+        created = await self.manager.async_upsert_item(
+            "2026-09",
+            {
+                "name": "Water",
+                "kind": "expense",
+                "amount": 50,
+                "recurrence": "monthly",
+                "recurrence_end": "2026-11-30",
+            },
+        )
+        september = next(
+            item
+            for item in self.manager.data["months"]["2026-09"]["items"]
+            if item["series_id"] == created["series_id"]
+        )
+
+        await self.manager.async_upsert_item(
+            "2026-09", {**september, "name": "Utilities"}, scope="this"
+        )
+
+        self.assertEqual(
+            [
+                next(
+                    item
+                    for item in self.manager.data["months"][key]["items"]
+                    if item["series_id"] == created["series_id"]
+                )["name"]
+                for key in ("2026-09", "2026-10", "2026-11")
+            ],
+            ["Utilities", "Utilities", "Utilities"],
+        )
+
     async def test_recurring_hourly_income_uses_each_months_working_hours(self) -> None:
         class FakeCalendar:
             async def async_month(self, month_key):

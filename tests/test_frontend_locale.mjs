@@ -126,8 +126,45 @@ panel._state = {
 const matrix = panel._renderYearMatrix();
 assert.ok(matrix.indexOf('data-plan-order-name="Zulu"') < matrix.indexOf('data-plan-order-name="Alpha"'));
 assert.match(matrix, /data-action="drag-plan-row"/);
+assert.match(matrix, /data-action="edit-plan-name"/);
+assert.match(matrix, /data-original-name="Zulu"/);
 assert.match(matrix, /aria-label="Reorder Zulu"/);
 assert.match(matrix, /mdi:drag-horizontal-variant/);
+
+const renameCalls = [];
+const renamedPlanState = {
+  ...panel._state,
+  selected_year: 2026,
+  settings: {
+    ...panel._state.settings,
+    plan_item_order: { income: [], expense: ["Utilities", "Alpha"] },
+  },
+};
+panel._hass.callWS = async (message) => {
+  renameCalls.push(message);
+  return message.type === "budget_manager/rename_plan_item"
+    ? { updated_count: 2 }
+    : renamedPlanState;
+};
+let renameMessage;
+panel._showMessage = (message) => { renameMessage = message; };
+const nameInput = {
+  value: " Utilities ",
+  disabled: false,
+  dataset: { saving: "false", originalName: "Zulu", kind: "expense" },
+};
+await panel._savePlanName(nameInput);
+assert.deepEqual(renameCalls, [
+  {
+    type: "budget_manager/rename_plan_item",
+    kind: "expense",
+    old_name: "Zulu",
+    new_name: "Utilities",
+  },
+  { type: "budget_manager/get_state", year: 2026 },
+]);
+assert.equal(panel._state, renamedPlanState);
+assert.equal(renameMessage, "Renamed 2 occurrences.");
 
 const dragHandles = [{ disabled: false }, { disabled: false }];
 let dragRows = ["Zulu", "Alpha"].map((name, index) => ({

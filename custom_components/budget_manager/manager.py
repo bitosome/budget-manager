@@ -429,6 +429,120 @@ class BudgetManager:
             await self._async_commit()
             return deepcopy(current)
 
+    @staticmethod
+    def _is_shared_plan_item(item: dict[str, Any], kind: str, name: str) -> bool:
+        """Return whether an occurrence belongs to an editable shared plan row."""
+        return bool(
+            item.get("kind") == kind
+            and item.get("expense_type") != CARE_LEAVE_TYPE
+            and item.get("generated_type") != GENERATED_BENEFIT_TYPE
+            and str(item.get("name", "")).strip() == name
+        )
+
+    def _rename_plan_item_locked(
+        self, kind: str, old_name: str, new_name: str
+    ) -> dict[str, Any]:
+        """Rename a shared plan row while the mutation lock is held."""
+        if kind not in {KIND_INCOME, KIND_EXPENSE}:
+            raise BudgetValidationError("Only income and expenditure can be renamed")
+        old_name = str(old_name).strip()
+        new_name = str(new_name).strip()
+        if not old_name:
+            raise BudgetValidationError("Current item name is required")
+        if not new_name:
+            raise BudgetValidationError("Item name is required")
+
+        matching_months = {
+            month_key
+            for month_key, month in self._data.get("months", {}).items()
+            if any(
+                self._is_shared_plan_item(item, kind, old_name)
+                for item in month.get("items", [])
+            )
+        }
+        if not matching_months:
+            raise BudgetValidationError(f"Plan item does not exist: {old_name}")
+
+        new_name_folded = new_name.casefold()
+        for month_key in matching_months:
+            month = self._data["months"][month_key]
+            collision = next(
+                (
+                    item
+                    for item in month.get("items", [])
+                    if item.get("kind") == kind
+                    and item.get("expense_type") != CARE_LEAVE_TYPE
+                    and item.get("generated_type") != GENERATED_BENEFIT_TYPE
+                    and not self._is_shared_plan_item(item, kind, old_name)
+                    and str(item.get("name", "")).strip().casefold()
+                    == new_name_folded
+                ),
+                None,
+            )
+            if collision is not None:
+                raise BudgetValidationError(
+                    f"{new_name} already exists in {month_key}"
+                )
+
+        renamed_ids: set[str] = set()
+        renamed_series: set[str] = set()
+        updated_count = 0
+        for month in self._data.get("months", {}).values():
+            for item in month.get("items", []):
+                if not self._is_shared_plan_item(item, kind, old_name):
+                    continue
+                item["name"] = new_name
+                if item.get("id"):
+                    renamed_ids.add(str(item["id"]))
+                if item.get("series_id"):
+                    renamed_series.add(str(item["series_id"]))
+                updated_count += 1
+
+        if kind == KIND_INCOME:
+            for month in self._data.get("months", {}).values():
+                for item in month.get("items", []):
+                    care_leave = item.get("care_leave") or {}
+                    linked_id = str(care_leave.get("linked_income_item_id") or "")
+                    linked_series = str(
+                        care_leave.get("linked_income_series_id") or ""
+                    )
+                    if (
+                        (linked_id and linked_id in renamed_ids)
+                        or (linked_series and linked_series in renamed_series)
+                    ):
+                        care_leave["linked_income_name"] = new_name
+
+        plan_order = normalize_plan_item_order(
+            self._data["settings"].get("plan_item_order")
+        )
+        renamed_order: list[str] = []
+        seen: set[str] = set()
+        for stored_name in plan_order[kind]:
+            candidate = new_name if stored_name == old_name else stored_name
+            folded = candidate.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            renamed_order.append(candidate)
+        plan_order[kind] = renamed_order
+        self._data["settings"]["plan_item_order"] = plan_order
+        return {
+            "kind": kind,
+            "old_name": old_name,
+            "new_name": new_name,
+            "updated_count": updated_count,
+            "plan_item_order": deepcopy(plan_order),
+        }
+
+    async def async_rename_plan_item(
+        self, kind: str, old_name: str, new_name: str
+    ) -> dict[str, Any]:
+        """Rename an editable plan row across every stored month."""
+        async with self._lock:
+            result = self._rename_plan_item_locked(kind, old_name, new_name)
+            await self._async_commit()
+            return result
+
     def current_month(self) -> dict[str, Any] | None:
         """Return the current or nearest budget month."""
         key = current_month_key(self._data, today=self.today())
@@ -592,8 +706,32 @@ class BudgetManager:
                     "Turn off automatic savings before managing savings manually"
                 )
 
-            if existing and scope == "future" and existing.get("series_id"):
-                series_id = existing["series_id"]
+            future_series_id = (
+                existing.get("series_id")
+                if existing and scope == "future" and existing.get("series_id")
+                else None
+            )
+            merged = {**(existing or {}), **raw}
+            if future_series_id:
+                merged["series_id"] = future_series_id
+            normalized = normalize_item(
+                await self._async_prepare_calculated_income(merged, month_key),
+                existing_id=existing["id"] if existing else None,
+            )
+            self._validate_care_leave_item(normalized)
+
+            if (
+                existing
+                and existing.get("kind") == normalized.get("kind")
+                and str(existing.get("name", "")).strip() != normalized["name"]
+                and existing.get("expense_type") != CARE_LEAVE_TYPE
+                and existing.get("generated_type") != GENERATED_BENEFIT_TYPE
+            ):
+                self._rename_plan_item_locked(
+                    normalized["kind"], existing["name"], normalized["name"]
+                )
+
+            if future_series_id:
                 for key, stored_month in self._data["months"].items():
                     if key < month_key:
                         continue
@@ -601,20 +739,14 @@ class BudgetManager:
                         item
                         for item in stored_month["items"]
                         if not (
-                            item.get("series_id") == series_id
+                            item.get("series_id") == future_series_id
                             and item.get("status", STATUS_PENDING) == STATUS_PENDING
                         )
                     ]
-                raw = {**raw, "series_id": series_id}
+                normalized["series_id"] = future_series_id
                 existing = None
                 raw_id = ""
 
-            merged = {**(existing or {}), **raw}
-            normalized = normalize_item(
-                await self._async_prepare_calculated_income(merged, month_key),
-                existing_id=existing["id"] if existing else None,
-            )
-            self._validate_care_leave_item(normalized)
             if existing:
                 index = month["items"].index(existing)
                 month["items"][index] = normalized
