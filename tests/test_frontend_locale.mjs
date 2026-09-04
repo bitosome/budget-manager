@@ -130,25 +130,43 @@ assert.match(matrix, /aria-label="Reorder Zulu"/);
 assert.match(matrix, /mdi:drag-horizontal-variant/);
 
 const dragHandles = [{ disabled: false }, { disabled: false }];
-const dragRows = ["Zulu", "Alpha"].map((name, index) => ({
+let dragRows = ["Zulu", "Alpha"].map((name, index) => ({
   dataset: { planKind: "expense", planOrderName: name },
   querySelector: () => dragHandles[index],
 }));
 panel.shadowRoot.querySelectorAll = (selector) => selector.includes('data-plan-kind="expense"') ? dragRows : [];
-let savedOrder;
+const savedOrders = [];
 panel._hass.callWS = async (message) => {
-  savedOrder = message;
+  savedOrders.push(message);
   return { income: [], expense: message.names };
 };
 panel._showMessage = () => {};
 await panel._savePlanRowOrder("expense", ["Alpha", "Zulu"]);
-assert.deepEqual(savedOrder, {
+assert.deepEqual(savedOrders[0], {
   type: "budget_manager/update_plan_item_order",
   kind: "expense",
   names: ["Zulu", "Alpha"],
 });
 assert.deepEqual(panel._state.settings.plan_item_order.expense, ["Zulu", "Alpha"]);
 assert.ok(dragHandles.every((handle) => handle.disabled === false));
+
+dragRows = [dragRows[1], dragRows[0]];
+await panel._savePlanRowOrder("expense", ["Zulu", "Alpha"]);
+assert.deepEqual(savedOrders[1], {
+  type: "budget_manager/update_plan_item_order",
+  kind: "expense",
+  names: ["Alpha", "Zulu"],
+});
+assert.deepEqual(panel._state.settings.plan_item_order.expense, ["Alpha", "Zulu"]);
+assert.ok(dragHandles.every((handle) => handle.disabled === false));
+
+let sortableDestroyed = false;
+panel._planSortable = { destroy: () => { sortableDestroyed = true; } };
+panel._sortablePlanDrag = { kind: "expense", originalOrder: ["Zulu", "Alpha"] };
+panel._destroyPlanSortable();
+assert.equal(sortableDestroyed, true);
+assert.equal(panel._planSortable, null);
+assert.equal(panel._sortablePlanDrag, null);
 
 const styles = panel._styles();
 assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);

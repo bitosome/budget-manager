@@ -1,0 +1,14 @@
+{
+  "name": "budget-manager-home-assistant",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild custom_components/budget_manager/frontend/budget-manager-panel.src.js --bundle --format=esm --minify --target=es2022 --legal-comments=eof --outfile=custom_components/budget_manager/frontend/budget-manager-panel.js"
+  },
+  "dependencies": {
+    "sortablejs": "1.15.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

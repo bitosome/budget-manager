@@ -1,1064 +1,163 @@
-class BudgetManagerPanel extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
-    this._state = null;
-    this._assignees = [];
-    this._year = new Date().getFullYear();
-    this._month = null;
-    this._loading = false;
-    this._error = null;
-    this._initialized = false;
-    this._defaultViewApplied = false;
-    this._currentMonthRequested = false;
-    this._hasConnected = false;
-    this._listeningForNavigation = false;
-    this._stickyFirstColumn = this._loadStickyFirstColumnPreference();
-    this._showPastMonths = this._loadShowPastMonthsPreference();
-    this._matrixEditMode = false;
-    this._handleLocationChanged = () => {
-      if (this._isBudgetRoute()) this._showCurrentMonth();
-    };
-  }
-
-  set hass(value) {
-    const previousLocale = this._hass ? JSON.stringify([
-      this._hass.locale?.language, this._hass.locale?.date_format,
-      this._hass.locale?.time_format, this._hass.locale?.time_zone,
-      this._hass.config?.time_zone,
-    ]) : null;
-    this._hass = value;
-    if (!this._initialized && value) {
-      this._year = this._currentDateParts().year;
-      this._initialized = true;
-      this._load();
-    } else if (value && previousLocale !== JSON.stringify([
-      value.locale?.language, value.locale?.date_format,
-      value.locale?.time_format, value.locale?.time_zone,
-      value.config?.time_zone,
-    ])) {
-      this._render();
-    }
-  }
-
-  set narrow(value) {
-    const changed = this._narrow !== Boolean(value);
-    this._narrow = Boolean(value);
-    if (changed && this._initialized) this._render();
-  }
-
-  set panel(value) {
-    this._panel = value;
-  }
-
-  connectedCallback() {
-    if (!this._listeningForNavigation) {
-      window.addEventListener("location-changed", this._handleLocationChanged);
-      window.addEventListener("popstate", this._handleLocationChanged);
-      this._listeningForNavigation = true;
-    }
-    if (this._hasConnected) this._showCurrentMonth();
-    this._hasConnected = true;
-    this._render();
-  }
-
-  disconnectedCallback() {
-    window.removeEventListener("location-changed", this._handleLocationChanged);
-    window.removeEventListener("popstate", this._handleLocationChanged);
-    this._listeningForNavigation = false;
-  }
-
-  _isBudgetRoute() {
-    return window.location.pathname === "/budget-manager"
-      || window.location.pathname.startsWith("/budget-manager/");
-  }
-
-  _loadStickyFirstColumnPreference() {
-    try {
-      const stored = window.localStorage.getItem("budget-manager-sticky-first-column");
-      if (stored !== null) return stored === "true";
-    } catch (_err) {
-      // Storage can be unavailable in restricted browser contexts.
-    }
-    return !window.matchMedia?.("(max-width: 700px)").matches;
-  }
-
-  _toggleStickyFirstColumn() {
-    this._stickyFirstColumn = !this._stickyFirstColumn;
-    try {
-      window.localStorage.setItem("budget-manager-sticky-first-column", String(this._stickyFirstColumn));
-    } catch (_err) {
-      // Keep the preference for this session when storage is unavailable.
-    }
-    this._render();
-  }
-
-  _loadShowPastMonthsPreference() {
-    try {
-      const stored = window.localStorage.getItem("budget-manager-show-past-months");
-      if (stored !== null) return stored === "true";
-    } catch (_err) {
-      // Storage can be unavailable in restricted browser contexts.
-    }
-    return true;
-  }
-
-  _togglePastMonths() {
-    this._showPastMonths = !this._showPastMonths;
-    try {
-      window.localStorage.setItem("budget-manager-show-past-months", String(this._showPastMonths));
-    } catch (_err) {
-      // Keep the preference for this session when storage is unavailable.
-    }
-    this._render();
-  }
-
-  _showCurrentMonth() {
-    this._defaultViewApplied = false;
-    this._currentMonthRequested = true;
-    this._month = null;
-    const current = this._state?.current_month;
-    if (!current) {
-      this._currentMonthRequested = false;
-      this._render();
-      return;
-    }
-    const currentYear = Number(current.slice(0, 4));
-    if (this._state.months[current]) {
-      this._year = currentYear;
-      this._month = current;
-      this._defaultViewApplied = true;
-      this._currentMonthRequested = false;
-      this._render();
-      return;
-    }
-    if (!this._loading) this._load(currentYear);
-  }
-
-  async _load(year = this._year) {
-    if (!this._hass || this._loading) return;
-    this._loading = true;
-    this._error = null;
-    this._render();
-    try {
-      const [state, assignees] = await Promise.all([
-        this._hass.callWS({ type: "budget_manager/get_state", year }),
-        this._canEdit
-          ? this._hass.callWS({ type: "budget_manager/notification_assignees" }).catch(() => [])
-          : Promise.resolve([]),
-      ]);
-      this._state = state;
-      this._assignees = assignees;
-      this._year = state.selected_year;
-      if (this._month && !state.months[this._month]) this._month = null;
-      if (!this._defaultViewApplied || this._currentMonthRequested) {
-        if (state.current_month && state.months[state.current_month]) {
-          this._month = state.current_month;
-          this._year = Number(state.current_month.slice(0, 4));
-          this._defaultViewApplied = true;
-          this._currentMonthRequested = false;
-        } else if (state.current_month) {
-          this._currentMonthRequested = true;
-        } else if (!state.current_month) {
-          this._defaultViewApplied = true;
-          this._currentMonthRequested = false;
-        }
-      }
-    } catch (err) {
-      this._error = err?.message || String(err);
-    } finally {
-      this._loading = false;
-      this._render();
-      const current = this._state?.current_month;
-      if (this._currentMonthRequested && current && !this._state.months[current]) {
-        const currentYear = Number(current.slice(0, 4));
-        if (currentYear !== this._year) this._load(currentYear);
-      }
-    }
-  }
-
-  get _canEdit() {
-    return Boolean(this._hass?.user?.is_admin);
-  }
-
-  _money(value) {
-    const currency = this._state?.settings?.currency || "EUR";
-    return new Intl.NumberFormat(this._state?.settings?.locale || "en-GB", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 2,
-    }).format(Number(value || 0));
-  }
-
-  _localeLanguage() {
-    return this._hass?.locale?.language
-      || this._hass?.language
-      || this._state?.settings?.locale
-      || window.navigator?.language
-      || "en-GB";
-  }
-
-  _resolvedTimeZone() {
-    if (this._hass?.locale?.time_zone === "local") {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-    }
-    return this._hass?.config?.time_zone
-      || Intl.DateTimeFormat().resolvedOptions().timeZone
-      || "UTC";
-  }
-
-  _currentDateParts() {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      year: "numeric", month: "2-digit", day: "2-digit",
-      timeZone: this._resolvedTimeZone(),
-    }).formatToParts(new Date());
-    const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
-    return { year: value("year"), month: value("month"), day: value("day") };
-  }
-
-  _dateOnly(value) {
-    const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!match) return null;
-    return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12));
-  }
-
-  _formatDate(value) {
-    const date = this._dateOnly(value);
-    if (!date) return String(value || "");
-    const locale = this._hass?.locale || {};
-    const language = locale.date_format === "system" ? undefined : this._localeLanguage();
-    const formatter = new Intl.DateTimeFormat(language, {
-      year: "numeric", month: "numeric", day: "numeric", timeZone: "UTC",
-    });
-    if (!["DMY", "MDY", "YMD"].includes(locale.date_format)) return formatter.format(date);
-    const parts = formatter.formatToParts(date);
-    const literal = parts.find((part) => part.type === "literal")?.value || "/";
-    const values = Object.fromEntries(parts.filter((part) => ["day", "month", "year"].includes(part.type)).map((part) => [part.type, part.value]));
-    const order = { DMY: ["day", "month", "year"], MDY: ["month", "day", "year"], YMD: ["year", "month", "day"] }[locale.date_format];
-    return order.map((part) => values[part]).join(literal);
-  }
-
-  _formatDateRange(start, end) {
-    if (!start) return "";
-    if (!end || start === end) return this._formatDate(start);
-    return `${this._formatDate(start)} – ${this._formatDate(end)}`;
-  }
-
-  _formatDateTime(value) {
-    const date = new Date(value);
-    if (!Number.isFinite(date.getTime())) return String(value || "");
-    const locale = this._hass?.locale || {};
-    const hourCycle = locale.time_format === "12" ? "h12" : locale.time_format === "24" ? "h23" : undefined;
-    const timeZone = this._resolvedTimeZone();
-    const dateParts = new Intl.DateTimeFormat("en-CA", {
-      year: "numeric", month: "2-digit", day: "2-digit", timeZone,
-    }).formatToParts(date);
-    const part = (type) => dateParts.find((entry) => entry.type === type)?.value || "";
-    const localDate = `${part("year")}-${part("month")}-${part("day")}`;
-    const time = new Intl.DateTimeFormat(locale.time_format === "system" ? undefined : this._localeLanguage(), {
-      hour: "numeric", minute: "2-digit", hourCycle, timeZone,
-    }).format(date);
-    return `${this._formatDate(localDate)} ${time}`;
-  }
-
-  _formatClockTime(value) {
-    const match = String(value || "").match(/^([01]\d|2[0-3]):([0-5]\d)$/);
-    if (!match) return String(value || "");
-    const locale = this._hass?.locale || {};
-    const hourCycle = locale.time_format === "12" ? "h12" : locale.time_format === "24" ? "h23" : undefined;
-    return new Intl.DateTimeFormat(locale.time_format === "system" ? undefined : this._localeLanguage(), {
-      hour: "numeric", minute: "2-digit", hourCycle, timeZone: "UTC",
-    }).format(new Date(Date.UTC(2000, 0, 1, Number(match[1]), Number(match[2]))));
-  }
-
-  _esc(value) {
-    return String(value ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
-  _monthLabel(key) {
-    const [year, month] = key.split("-").map(Number);
-    return new Intl.DateTimeFormat(this._localeLanguage(), {
-      month: "long", year: "numeric", timeZone: "UTC",
-    }).format(new Date(Date.UTC(year, month - 1, 1, 12)));
-  }
-
-  _monthName(key, width = "long") {
-    const [year, month] = key.split("-").map(Number);
-    return new Intl.DateTimeFormat(this._localeLanguage(), {
-      month: width, timeZone: "UTC",
-    }).format(new Date(Date.UTC(year, month - 1, 1, 12)));
-  }
-
-  _incomeWorkingMonth(budgetMonth, workPeriod) {
-    if (workPeriod !== "previous_month") return budgetMonth;
-    const [year, month] = budgetMonth.split("-").map(Number);
-    const previousYear = month === 1 ? year - 1 : year;
-    const previousMonth = month === 1 ? 12 : month - 1;
-    return `${previousYear}-${String(previousMonth).padStart(2, "0")}`;
-  }
-
-  _render() {
-    if (!this.shadowRoot) return;
-    const body = this._error
-      ? `<div class="empty error">${this._esc(this._error)}</div>`
-      : !this._state
-        ? `<div class="empty">Loading budget…</div>`
-        : this._month
-          ? this._renderMonth(this._state.months[this._month])
-          : this._renderYear();
-
-    this.shadowRoot.innerHTML = `
+function zt(n,e){var t=Object.keys(n);if(Object.getOwnPropertySymbols){var a=Object.getOwnPropertySymbols(n);e&&(a=a.filter(function(i){return Object.getOwnPropertyDescriptor(n,i).enumerable})),t.push.apply(t,a)}return t}function ie(n){for(var e=1;e<arguments.length;e++){var t=arguments[e]!=null?arguments[e]:{};e%2?zt(Object(t),!0).forEach(function(a){ha(n,a,t[a])}):Object.getOwnPropertyDescriptors?Object.defineProperties(n,Object.getOwnPropertyDescriptors(t)):zt(Object(t)).forEach(function(a){Object.defineProperty(n,a,Object.getOwnPropertyDescriptor(t,a))})}return n}function tt(n){"@babel/helpers - typeof";return typeof Symbol=="function"&&typeof Symbol.iterator=="symbol"?tt=function(e){return typeof e}:tt=function(e){return e&&typeof Symbol=="function"&&e.constructor===Symbol&&e!==Symbol.prototype?"symbol":typeof e},tt(n)}function ha(n,e,t){return e in n?Object.defineProperty(n,e,{value:t,enumerable:!0,configurable:!0,writable:!0}):n[e]=t,n}function se(){return se=Object.assign||function(n){for(var e=1;e<arguments.length;e++){var t=arguments[e];for(var a in t)Object.prototype.hasOwnProperty.call(t,a)&&(n[a]=t[a])}return n},se.apply(this,arguments)}function pa(n,e){if(n==null)return{};var t={},a=Object.keys(n),i,o;for(o=0;o<a.length;o++)i=a[o],!(e.indexOf(i)>=0)&&(t[i]=n[i]);return t}function ma(n,e){if(n==null)return{};var t=pa(n,e),a,i;if(Object.getOwnPropertySymbols){var o=Object.getOwnPropertySymbols(n);for(i=0;i<o.length;i++)a=o[i],!(e.indexOf(a)>=0)&&Object.prototype.propertyIsEnumerable.call(n,a)&&(t[a]=n[a])}return t}var ga="1.15.6";function re(n){if(typeof window<"u"&&window.navigator)return!!navigator.userAgent.match(n)}var le=re(/(?:Trident.*rv[ :]?11\.|msie|iemobile|Windows Phone)/i),Ye=re(/Edge/i),jt=re(/firefox/i),Le=re(/safari/i)&&!re(/chrome/i)&&!re(/android/i),Dt=re(/iP(ad|od|hone)/i),Vt=re(/chrome/i)&&re(/android/i),Kt={capture:!1,passive:!1};function D(n,e,t){n.addEventListener(e,t,!le&&Kt)}function $(n,e,t){n.removeEventListener(e,t,!le&&Kt)}function rt(n,e){if(e){if(e[0]===">"&&(e=e.substring(1)),n)try{if(n.matches)return n.matches(e);if(n.msMatchesSelector)return n.msMatchesSelector(e);if(n.webkitMatchesSelector)return n.webkitMatchesSelector(e)}catch{return!1}return!1}}function Zt(n){return n.host&&n!==document&&n.host.nodeType?n.host:n.parentNode}function te(n,e,t,a){if(n){t=t||document;do{if(e!=null&&(e[0]===">"?n.parentNode===t&&rt(n,e):rt(n,e))||a&&n===t)return n;if(n===t)break}while(n=Zt(n))}return null}var Bt=/\s+/g;function X(n,e,t){if(n&&e)if(n.classList)n.classList[t?"add":"remove"](e);else{var a=(" "+n.className+" ").replace(Bt," ").replace(" "+e+" "," ");n.className=(a+(t?" "+e:"")).replace(Bt," ")}}function _(n,e,t){var a=n&&n.style;if(a){if(t===void 0)return document.defaultView&&document.defaultView.getComputedStyle?t=document.defaultView.getComputedStyle(n,""):n.currentStyle&&(t=n.currentStyle),e===void 0?t:t[e];!(e in a)&&e.indexOf("webkit")===-1&&(e="-webkit-"+e),a[e]=t+(typeof t=="string"?"":"px")}}function Ce(n,e){var t="";if(typeof n=="string")t=n;else do{var a=_(n,"transform");a&&a!=="none"&&(t=a+" "+t)}while(!e&&(n=n.parentNode));var i=window.DOMMatrix||window.WebKitCSSMatrix||window.CSSMatrix||window.MSCSSMatrix;return i&&new i(t)}function Jt(n,e,t){if(n){var a=n.getElementsByTagName(e),i=0,o=a.length;if(t)for(;i<o;i++)t(a[i],i);return a}return[]}function ne(){var n=document.scrollingElement;return n||document.documentElement}function R(n,e,t,a,i){if(!(!n.getBoundingClientRect&&n!==window)){var o,r,s,l,c,u,m;if(n!==window&&n.parentNode&&n!==ne()?(o=n.getBoundingClientRect(),r=o.top,s=o.left,l=o.bottom,c=o.right,u=o.height,m=o.width):(r=0,s=0,l=window.innerHeight,c=window.innerWidth,u=window.innerHeight,m=window.innerWidth),(e||t)&&n!==window&&(i=i||n.parentNode,!le))do if(i&&i.getBoundingClientRect&&(_(i,"transform")!=="none"||t&&_(i,"position")!=="static")){var y=i.getBoundingClientRect();r-=y.top+parseInt(_(i,"border-top-width")),s-=y.left+parseInt(_(i,"border-left-width")),l=r+o.height,c=s+o.width;break}while(i=i.parentNode);if(a&&n!==window){var k=Ce(i||n),w=k&&k.a,d=k&&k.d;k&&(r/=d,s/=w,m/=w,u/=d,l=r+u,c=s+m)}return{top:r,left:s,bottom:l,right:c,width:m,height:u}}}function Wt(n,e,t){for(var a=he(n,!0),i=R(n)[e];a;){var o=R(a)[t],r=void 0;if(t==="top"||t==="left"?r=i>=o:r=i<=o,!r)return a;if(a===ne())break;a=he(a,!1)}return!1}function Te(n,e,t,a){for(var i=0,o=0,r=n.children;o<r.length;){if(r[o].style.display!=="none"&&r[o]!==b.ghost&&(a||r[o]!==b.dragged)&&te(r[o],t.draggable,n,!1)){if(i===e)return r[o];i++}o++}return null}function Ct(n,e){for(var t=n.lastElementChild;t&&(t===b.ghost||_(t,"display")==="none"||e&&!rt(t,e));)t=t.previousElementSibling;return t||null}function J(n,e){var t=0;if(!n||!n.parentNode)return-1;for(;n=n.previousElementSibling;)n.nodeName.toUpperCase()!=="TEMPLATE"&&n!==b.clone&&(!e||rt(n,e))&&t++;return t}function Yt(n){var e=0,t=0,a=ne();if(n)do{var i=Ce(n),o=i.a,r=i.d;e+=n.scrollLeft*o,t+=n.scrollTop*r}while(n!==a&&(n=n.parentNode));return[e,t]}function fa(n,e){for(var t in n)if(n.hasOwnProperty(t)){for(var a in e)if(e.hasOwnProperty(a)&&e[a]===n[t][a])return Number(t)}return-1}function he(n,e){if(!n||!n.getBoundingClientRect)return ne();var t=n,a=!1;do if(t.clientWidth<t.scrollWidth||t.clientHeight<t.scrollHeight){var i=_(t);if(t.clientWidth<t.scrollWidth&&(i.overflowX=="auto"||i.overflowX=="scroll")||t.clientHeight<t.scrollHeight&&(i.overflowY=="auto"||i.overflowY=="scroll")){if(!t.getBoundingClientRect||t===document.body)return ne();if(a||e)return t;a=!0}}while(t=t.parentNode);return ne()}function _a(n,e){if(n&&e)for(var t in e)e.hasOwnProperty(t)&&(n[t]=e[t]);return n}function mt(n,e){return Math.round(n.top)===Math.round(e.top)&&Math.round(n.left)===Math.round(e.left)&&Math.round(n.height)===Math.round(e.height)&&Math.round(n.width)===Math.round(e.width)}var ze;function Qt(n,e){return function(){if(!ze){var t=arguments,a=this;t.length===1?n.call(a,t[0]):n.apply(a,t),ze=setTimeout(function(){ze=void 0},e)}}}function ba(){clearTimeout(ze),ze=void 0}function ea(n,e,t){n.scrollLeft+=e,n.scrollTop+=t}function ta(n){var e=window.Polymer,t=window.jQuery||window.Zepto;return e&&e.dom?e.dom(n).cloneNode(!0):t?t(n).clone(!0)[0]:n.cloneNode(!0)}function aa(n,e,t){var a={};return Array.from(n.children).forEach(function(i){var o,r,s,l;if(!(!te(i,e.draggable,n,!1)||i.animated||i===t)){var c=R(i);a.left=Math.min((o=a.left)!==null&&o!==void 0?o:1/0,c.left),a.top=Math.min((r=a.top)!==null&&r!==void 0?r:1/0,c.top),a.right=Math.max((s=a.right)!==null&&s!==void 0?s:-1/0,c.right),a.bottom=Math.max((l=a.bottom)!==null&&l!==void 0?l:-1/0,c.bottom)}}),a.width=a.right-a.left,a.height=a.bottom-a.top,a.x=a.left,a.y=a.top,a}var G="Sortable"+new Date().getTime();function va(){var n=[],e;return{captureAnimationState:function(){if(n=[],!!this.options.animation){var a=[].slice.call(this.el.children);a.forEach(function(i){if(!(_(i,"display")==="none"||i===b.ghost)){n.push({target:i,rect:R(i)});var o=ie({},n[n.length-1].rect);if(i.thisAnimationDuration){var r=Ce(i,!0);r&&(o.top-=r.f,o.left-=r.e)}i.fromRect=o}})}},addAnimationState:function(a){n.push(a)},removeAnimationState:function(a){n.splice(fa(n,{target:a}),1)},animateAll:function(a){var i=this;if(!this.options.animation){clearTimeout(e),typeof a=="function"&&a();return}var o=!1,r=0;n.forEach(function(s){var l=0,c=s.target,u=c.fromRect,m=R(c),y=c.prevFromRect,k=c.prevToRect,w=s.rect,d=Ce(c,!0);d&&(m.top-=d.f,m.left-=d.e),c.toRect=m,c.thisAnimationDuration&&mt(y,m)&&!mt(u,m)&&(w.top-m.top)/(w.left-m.left)===(u.top-m.top)/(u.left-m.left)&&(l=wa(w,y,k,i.options)),mt(m,u)||(c.prevFromRect=u,c.prevToRect=m,l||(l=i.options.animation),i.animate(c,w,m,l)),l&&(o=!0,r=Math.max(r,l),clearTimeout(c.animationResetTimer),c.animationResetTimer=setTimeout(function(){c.animationTime=0,c.prevFromRect=null,c.fromRect=null,c.prevToRect=null,c.thisAnimationDuration=null},l),c.thisAnimationDuration=l)}),clearTimeout(e),o?e=setTimeout(function(){typeof a=="function"&&a()},r):typeof a=="function"&&a(),n=[]},animate:function(a,i,o,r){if(r){_(a,"transition",""),_(a,"transform","");var s=Ce(this.el),l=s&&s.a,c=s&&s.d,u=(i.left-o.left)/(l||1),m=(i.top-o.top)/(c||1);a.animatingX=!!u,a.animatingY=!!m,_(a,"transform","translate3d("+u+"px,"+m+"px,0)"),this.forRepaintDummy=ya(a),_(a,"transition","transform "+r+"ms"+(this.options.easing?" "+this.options.easing:"")),_(a,"transform","translate3d(0,0,0)"),typeof a.animated=="number"&&clearTimeout(a.animated),a.animated=setTimeout(function(){_(a,"transition",""),_(a,"transform",""),a.animated=!1,a.animatingX=!1,a.animatingY=!1},r)}}}}function ya(n){return n.offsetWidth}function wa(n,e,t,a){return Math.sqrt(Math.pow(e.top-n.top,2)+Math.pow(e.left-n.left,2))/Math.sqrt(Math.pow(e.top-t.top,2)+Math.pow(e.left-t.left,2))*a.animation}var Se=[],gt={initializeByDefault:!0},He={mount:function(e){for(var t in gt)gt.hasOwnProperty(t)&&!(t in e)&&(e[t]=gt[t]);Se.forEach(function(a){if(a.pluginName===e.pluginName)throw"Sortable: Cannot mount plugin ".concat(e.pluginName," more than once")}),Se.push(e)},pluginEvent:function(e,t,a){var i=this;this.eventCanceled=!1,a.cancel=function(){i.eventCanceled=!0};var o=e+"Global";Se.forEach(function(r){t[r.pluginName]&&(t[r.pluginName][o]&&t[r.pluginName][o](ie({sortable:t},a)),t.options[r.pluginName]&&t[r.pluginName][e]&&t[r.pluginName][e](ie({sortable:t},a)))})},initializePlugins:function(e,t,a,i){Se.forEach(function(s){var l=s.pluginName;if(!(!e.options[l]&&!s.initializeByDefault)){var c=new s(e,t,e.options);c.sortable=e,c.options=e.options,e[l]=c,se(a,c.defaults)}});for(var o in e.options)if(e.options.hasOwnProperty(o)){var r=this.modifyOption(e,o,e.options[o]);typeof r<"u"&&(e.options[o]=r)}},getEventProperties:function(e,t){var a={};return Se.forEach(function(i){typeof i.eventProperties=="function"&&se(a,i.eventProperties.call(t[i.pluginName],e))}),a},modifyOption:function(e,t,a){var i;return Se.forEach(function(o){e[o.pluginName]&&o.optionListeners&&typeof o.optionListeners[t]=="function"&&(i=o.optionListeners[t].call(e[o.pluginName],a))}),i}};function xa(n){var e=n.sortable,t=n.rootEl,a=n.name,i=n.targetEl,o=n.cloneEl,r=n.toEl,s=n.fromEl,l=n.oldIndex,c=n.newIndex,u=n.oldDraggableIndex,m=n.newDraggableIndex,y=n.originalEvent,k=n.putSortable,w=n.extraEventProperties;if(e=e||t&&t[G],!!e){var d,S=e.options,C="on"+a.charAt(0).toUpperCase()+a.substr(1);window.CustomEvent&&!le&&!Ye?d=new CustomEvent(a,{bubbles:!0,cancelable:!0}):(d=document.createEvent("Event"),d.initEvent(a,!0,!0)),d.to=r||t,d.from=s||t,d.item=i||t,d.clone=o,d.oldIndex=l,d.newIndex=c,d.oldDraggableIndex=u,d.newDraggableIndex=m,d.originalEvent=y,d.pullMode=k?k.lastPutMode:void 0;var v=ie(ie({},w),He.getEventProperties(a,e));for(var E in v)d[E]=v[E];t&&t.dispatchEvent(d),S[C]&&S[C].call(e,d)}}var ka=["evt"],U=function(e,t){var a=arguments.length>2&&arguments[2]!==void 0?arguments[2]:{},i=a.evt,o=ma(a,ka);He.pluginEvent.bind(b)(e,t,ie({dragEl:p,parentEl:O,ghostEl:x,rootEl:N,nextEl:we,lastDownEl:at,cloneEl:A,cloneHidden:ue,dragStarted:Re,putSortable:z,activeSortable:b.active,originalEvent:i,oldIndex:De,oldDraggableIndex:je,newIndex:V,newDraggableIndex:de,hideGhostForTarget:ra,unhideGhostForTarget:sa,cloneNowHidden:function(){ue=!0},cloneNowShown:function(){ue=!1},dispatchSortableEvent:function(s){W({sortable:t,name:s,originalEvent:i})}},o))};function W(n){xa(ie({putSortable:z,cloneEl:A,targetEl:p,rootEl:N,oldIndex:De,oldDraggableIndex:je,newIndex:V,newDraggableIndex:de},n))}var p,O,x,N,we,at,A,ue,De,V,je,de,Ze,z,$e=!1,st=!1,lt=[],ve,ee,ft,_t,Ht,Ut,Re,Ee,Be,We=!1,Je=!1,nt,B,bt=[],kt=!1,ct=[],ut=typeof document<"u",Qe=Dt,Gt=Ye||le?"cssFloat":"float",Sa=ut&&!Vt&&!Dt&&"draggable"in document.createElement("div"),na=(function(){if(ut){if(le)return!1;var n=document.createElement("x");return n.style.cssText="pointer-events:auto",n.style.pointerEvents==="auto"}})(),ia=function(e,t){var a=_(e),i=parseInt(a.width)-parseInt(a.paddingLeft)-parseInt(a.paddingRight)-parseInt(a.borderLeftWidth)-parseInt(a.borderRightWidth),o=Te(e,0,t),r=Te(e,1,t),s=o&&_(o),l=r&&_(r),c=s&&parseInt(s.marginLeft)+parseInt(s.marginRight)+R(o).width,u=l&&parseInt(l.marginLeft)+parseInt(l.marginRight)+R(r).width;if(a.display==="flex")return a.flexDirection==="column"||a.flexDirection==="column-reverse"?"vertical":"horizontal";if(a.display==="grid")return a.gridTemplateColumns.split(" ").length<=1?"vertical":"horizontal";if(o&&s.float&&s.float!=="none"){var m=s.float==="left"?"left":"right";return r&&(l.clear==="both"||l.clear===m)?"vertical":"horizontal"}return o&&(s.display==="block"||s.display==="flex"||s.display==="table"||s.display==="grid"||c>=i&&a[Gt]==="none"||r&&a[Gt]==="none"&&c+u>i)?"vertical":"horizontal"},Ea=function(e,t,a){var i=a?e.left:e.top,o=a?e.right:e.bottom,r=a?e.width:e.height,s=a?t.left:t.top,l=a?t.right:t.bottom,c=a?t.width:t.height;return i===s||o===l||i+r/2===s+c/2},$a=function(e,t){var a;return lt.some(function(i){var o=i[G].options.emptyInsertThreshold;if(!(!o||Ct(i))){var r=R(i),s=e>=r.left-o&&e<=r.right+o,l=t>=r.top-o&&t<=r.bottom+o;if(s&&l)return a=i}}),a},oa=function(e){function t(o,r){return function(s,l,c,u){var m=s.options.group.name&&l.options.group.name&&s.options.group.name===l.options.group.name;if(o==null&&(r||m))return!0;if(o==null||o===!1)return!1;if(r&&o==="clone")return o;if(typeof o=="function")return t(o(s,l,c,u),r)(s,l,c,u);var y=(r?s:l).options.group.name;return o===!0||typeof o=="string"&&o===y||o.join&&o.indexOf(y)>-1}}var a={},i=e.group;(!i||tt(i)!="object")&&(i={name:i}),a.name=i.name,a.checkPull=t(i.pull,!0),a.checkPut=t(i.put),a.revertClone=i.revertClone,e.group=a},ra=function(){!na&&x&&_(x,"display","none")},sa=function(){!na&&x&&_(x,"display","")};ut&&!Vt&&document.addEventListener("click",function(n){if(st)return n.preventDefault(),n.stopPropagation&&n.stopPropagation(),n.stopImmediatePropagation&&n.stopImmediatePropagation(),st=!1,!1},!0);var ye=function(e){if(p){e=e.touches?e.touches[0]:e;var t=$a(e.clientX,e.clientY);if(t){var a={};for(var i in e)e.hasOwnProperty(i)&&(a[i]=e[i]);a.target=a.rootEl=t,a.preventDefault=void 0,a.stopPropagation=void 0,t[G]._onDragOver(a)}}},Da=function(e){p&&p.parentNode[G]._isOutsideThisEl(e.target)};function b(n,e){if(!(n&&n.nodeType&&n.nodeType===1))throw"Sortable: `el` must be an HTMLElement, not ".concat({}.toString.call(n));this.el=n,this.options=e=se({},e),n[G]=this;var t={group:null,sort:!0,disabled:!1,store:null,handle:null,draggable:/^[uo]l$/i.test(n.nodeName)?">li":">*",swapThreshold:1,invertSwap:!1,invertedSwapThreshold:null,removeCloneOnHide:!0,direction:function(){return ia(n,this.options)},ghostClass:"sortable-ghost",chosenClass:"sortable-chosen",dragClass:"sortable-drag",ignore:"a, img",filter:null,preventOnFilter:!0,animation:0,easing:null,setData:function(r,s){r.setData("Text",s.textContent)},dropBubble:!1,dragoverBubble:!1,dataIdAttr:"data-id",delay:0,delayOnTouchOnly:!1,touchStartThreshold:(Number.parseInt?Number:window).parseInt(window.devicePixelRatio,10)||1,forceFallback:!1,fallbackClass:"sortable-fallback",fallbackOnBody:!1,fallbackTolerance:0,fallbackOffset:{x:0,y:0},supportPointer:b.supportPointer!==!1&&"PointerEvent"in window&&(!Le||Dt),emptyInsertThreshold:5};He.initializePlugins(this,n,t);for(var a in t)!(a in e)&&(e[a]=t[a]);oa(e);for(var i in this)i.charAt(0)==="_"&&typeof this[i]=="function"&&(this[i]=this[i].bind(this));this.nativeDraggable=e.forceFallback?!1:Sa,this.nativeDraggable&&(this.options.touchStartThreshold=1),e.supportPointer?D(n,"pointerdown",this._onTapStart):(D(n,"mousedown",this._onTapStart),D(n,"touchstart",this._onTapStart)),this.nativeDraggable&&(D(n,"dragover",this),D(n,"dragenter",this)),lt.push(this.el),e.store&&e.store.get&&this.sort(e.store.get(this)||[]),se(this,va())}b.prototype={constructor:b,_isOutsideThisEl:function(e){!this.el.contains(e)&&e!==this.el&&(Ee=null)},_getDirection:function(e,t){return typeof this.options.direction=="function"?this.options.direction.call(this,e,t,p):this.options.direction},_onTapStart:function(e){if(e.cancelable){var t=this,a=this.el,i=this.options,o=i.preventOnFilter,r=e.type,s=e.touches&&e.touches[0]||e.pointerType&&e.pointerType==="touch"&&e,l=(s||e).target,c=e.target.shadowRoot&&(e.path&&e.path[0]||e.composedPath&&e.composedPath()[0])||l,u=i.filter;if(Pa(a),!p&&!(/mousedown|pointerdown/.test(r)&&e.button!==0||i.disabled)&&!c.isContentEditable&&!(!this.nativeDraggable&&Le&&l&&l.tagName.toUpperCase()==="SELECT")&&(l=te(l,i.draggable,a,!1),!(l&&l.animated)&&at!==l)){if(De=J(l),je=J(l,i.draggable),typeof u=="function"){if(u.call(this,e,l,this)){W({sortable:t,rootEl:c,name:"filter",targetEl:l,toEl:a,fromEl:a}),U("filter",t,{evt:e}),o&&e.preventDefault();return}}else if(u&&(u=u.split(",").some(function(m){if(m=te(c,m.trim(),a,!1),m)return W({sortable:t,rootEl:m,name:"filter",targetEl:l,fromEl:a,toEl:a}),U("filter",t,{evt:e}),!0}),u)){o&&e.preventDefault();return}i.handle&&!te(c,i.handle,a,!1)||this._prepareDragStart(e,s,l)}}},_prepareDragStart:function(e,t,a){var i=this,o=i.el,r=i.options,s=o.ownerDocument,l;if(a&&!p&&a.parentNode===o){var c=R(a);if(N=o,p=a,O=p.parentNode,we=p.nextSibling,at=a,Ze=r.group,b.dragged=p,ve={target:p,clientX:(t||e).clientX,clientY:(t||e).clientY},Ht=ve.clientX-c.left,Ut=ve.clientY-c.top,this._lastX=(t||e).clientX,this._lastY=(t||e).clientY,p.style["will-change"]="all",l=function(){if(U("delayEnded",i,{evt:e}),b.eventCanceled){i._onDrop();return}i._disableDelayedDragEvents(),!jt&&i.nativeDraggable&&(p.draggable=!0),i._triggerDragStart(e,t),W({sortable:i,name:"choose",originalEvent:e}),X(p,r.chosenClass,!0)},r.ignore.split(",").forEach(function(u){Jt(p,u.trim(),vt)}),D(s,"dragover",ye),D(s,"mousemove",ye),D(s,"touchmove",ye),r.supportPointer?(D(s,"pointerup",i._onDrop),!this.nativeDraggable&&D(s,"pointercancel",i._onDrop)):(D(s,"mouseup",i._onDrop),D(s,"touchend",i._onDrop),D(s,"touchcancel",i._onDrop)),jt&&this.nativeDraggable&&(this.options.touchStartThreshold=4,p.draggable=!0),U("delayStart",this,{evt:e}),r.delay&&(!r.delayOnTouchOnly||t)&&(!this.nativeDraggable||!(Ye||le))){if(b.eventCanceled){this._onDrop();return}r.supportPointer?(D(s,"pointerup",i._disableDelayedDrag),D(s,"pointercancel",i._disableDelayedDrag)):(D(s,"mouseup",i._disableDelayedDrag),D(s,"touchend",i._disableDelayedDrag),D(s,"touchcancel",i._disableDelayedDrag)),D(s,"mousemove",i._delayedDragTouchMoveHandler),D(s,"touchmove",i._delayedDragTouchMoveHandler),r.supportPointer&&D(s,"pointermove",i._delayedDragTouchMoveHandler),i._dragStartTimer=setTimeout(l,r.delay)}else l()}},_delayedDragTouchMoveHandler:function(e){var t=e.touches?e.touches[0]:e;Math.max(Math.abs(t.clientX-this._lastX),Math.abs(t.clientY-this._lastY))>=Math.floor(this.options.touchStartThreshold/(this.nativeDraggable&&window.devicePixelRatio||1))&&this._disableDelayedDrag()},_disableDelayedDrag:function(){p&&vt(p),clearTimeout(this._dragStartTimer),this._disableDelayedDragEvents()},_disableDelayedDragEvents:function(){var e=this.el.ownerDocument;$(e,"mouseup",this._disableDelayedDrag),$(e,"touchend",this._disableDelayedDrag),$(e,"touchcancel",this._disableDelayedDrag),$(e,"pointerup",this._disableDelayedDrag),$(e,"pointercancel",this._disableDelayedDrag),$(e,"mousemove",this._delayedDragTouchMoveHandler),$(e,"touchmove",this._delayedDragTouchMoveHandler),$(e,"pointermove",this._delayedDragTouchMoveHandler)},_triggerDragStart:function(e,t){t=t||e.pointerType=="touch"&&e,!this.nativeDraggable||t?this.options.supportPointer?D(document,"pointermove",this._onTouchMove):t?D(document,"touchmove",this._onTouchMove):D(document,"mousemove",this._onTouchMove):(D(p,"dragend",this),D(N,"dragstart",this._onDragStart));try{document.selection?it(function(){document.selection.empty()}):window.getSelection().removeAllRanges()}catch{}},_dragStarted:function(e,t){if($e=!1,N&&p){U("dragStarted",this,{evt:t}),this.nativeDraggable&&D(document,"dragover",Da);var a=this.options;!e&&X(p,a.dragClass,!1),X(p,a.ghostClass,!0),b.active=this,e&&this._appendGhost(),W({sortable:this,name:"start",originalEvent:t})}else this._nulling()},_emulateDragOver:function(){if(ee){this._lastX=ee.clientX,this._lastY=ee.clientY,ra();for(var e=document.elementFromPoint(ee.clientX,ee.clientY),t=e;e&&e.shadowRoot&&(e=e.shadowRoot.elementFromPoint(ee.clientX,ee.clientY),e!==t);)t=e;if(p.parentNode[G]._isOutsideThisEl(e),t)do{if(t[G]){var a=void 0;if(a=t[G]._onDragOver({clientX:ee.clientX,clientY:ee.clientY,target:e,rootEl:t}),a&&!this.options.dragoverBubble)break}e=t}while(t=Zt(t));sa()}},_onTouchMove:function(e){if(ve){var t=this.options,a=t.fallbackTolerance,i=t.fallbackOffset,o=e.touches?e.touches[0]:e,r=x&&Ce(x,!0),s=x&&r&&r.a,l=x&&r&&r.d,c=Qe&&B&&Yt(B),u=(o.clientX-ve.clientX+i.x)/(s||1)+(c?c[0]-bt[0]:0)/(s||1),m=(o.clientY-ve.clientY+i.y)/(l||1)+(c?c[1]-bt[1]:0)/(l||1);if(!b.active&&!$e){if(a&&Math.max(Math.abs(o.clientX-this._lastX),Math.abs(o.clientY-this._lastY))<a)return;this._onDragStart(e,!0)}if(x){r?(r.e+=u-(ft||0),r.f+=m-(_t||0)):r={a:1,b:0,c:0,d:1,e:u,f:m};var y="matrix(".concat(r.a,",").concat(r.b,",").concat(r.c,",").concat(r.d,",").concat(r.e,",").concat(r.f,")");_(x,"webkitTransform",y),_(x,"mozTransform",y),_(x,"msTransform",y),_(x,"transform",y),ft=u,_t=m,ee=o}e.cancelable&&e.preventDefault()}},_appendGhost:function(){if(!x){var e=this.options.fallbackOnBody?document.body:N,t=R(p,!0,Qe,!0,e),a=this.options;if(Qe){for(B=e;_(B,"position")==="static"&&_(B,"transform")==="none"&&B!==document;)B=B.parentNode;B!==document.body&&B!==document.documentElement?(B===document&&(B=ne()),t.top+=B.scrollTop,t.left+=B.scrollLeft):B=ne(),bt=Yt(B)}x=p.cloneNode(!0),X(x,a.ghostClass,!1),X(x,a.fallbackClass,!0),X(x,a.dragClass,!0),_(x,"transition",""),_(x,"transform",""),_(x,"box-sizing","border-box"),_(x,"margin",0),_(x,"top",t.top),_(x,"left",t.left),_(x,"width",t.width),_(x,"height",t.height),_(x,"opacity","0.8"),_(x,"position",Qe?"absolute":"fixed"),_(x,"zIndex","100000"),_(x,"pointerEvents","none"),b.ghost=x,e.appendChild(x),_(x,"transform-origin",Ht/parseInt(x.style.width)*100+"% "+Ut/parseInt(x.style.height)*100+"%")}},_onDragStart:function(e,t){var a=this,i=e.dataTransfer,o=a.options;if(U("dragStart",this,{evt:e}),b.eventCanceled){this._onDrop();return}U("setupClone",this),b.eventCanceled||(A=ta(p),A.removeAttribute("id"),A.draggable=!1,A.style["will-change"]="",this._hideClone(),X(A,this.options.chosenClass,!1),b.clone=A),a.cloneId=it(function(){U("clone",a),!b.eventCanceled&&(a.options.removeCloneOnHide||N.insertBefore(A,p),a._hideClone(),W({sortable:a,name:"clone"}))}),!t&&X(p,o.dragClass,!0),t?(st=!0,a._loopId=setInterval(a._emulateDragOver,50)):($(document,"mouseup",a._onDrop),$(document,"touchend",a._onDrop),$(document,"touchcancel",a._onDrop),i&&(i.effectAllowed="move",o.setData&&o.setData.call(a,i,p)),D(document,"drop",a),_(p,"transform","translateZ(0)")),$e=!0,a._dragStartId=it(a._dragStarted.bind(a,t,e)),D(document,"selectstart",a),Re=!0,window.getSelection().removeAllRanges(),Le&&_(document.body,"user-select","none")},_onDragOver:function(e){var t=this.el,a=e.target,i,o,r,s=this.options,l=s.group,c=b.active,u=Ze===l,m=s.sort,y=z||c,k,w=this,d=!1;if(kt)return;function S(H,Me){U(H,w,ie({evt:e,isOwner:u,axis:k?"vertical":"horizontal",revert:r,dragRect:i,targetRect:o,canSort:m,fromSortable:y,target:a,completed:v,onMove:function(fe,j){return et(N,t,p,i,fe,R(fe),e,j)},changed:E},Me))}function C(){S("dragOverAnimationCapture"),w.captureAnimationState(),w!==y&&y.captureAnimationState()}function v(H){return S("dragOverCompleted",{insertion:H}),H&&(u?c._hideClone():c._showClone(w),w!==y&&(X(p,z?z.options.ghostClass:c.options.ghostClass,!1),X(p,s.ghostClass,!0)),z!==w&&w!==b.active?z=w:w===b.active&&z&&(z=null),y===w&&(w._ignoreWhileAnimating=a),w.animateAll(function(){S("dragOverAnimationComplete"),w._ignoreWhileAnimating=null}),w!==y&&(y.animateAll(),y._ignoreWhileAnimating=null)),(a===p&&!p.animated||a===t&&!a.animated)&&(Ee=null),!s.dragoverBubble&&!e.rootEl&&a!==document&&(p.parentNode[G]._isOutsideThisEl(e.target),!H&&ye(e)),!s.dragoverBubble&&e.stopPropagation&&e.stopPropagation(),d=!0}function E(){V=J(p),de=J(p,s.draggable),W({sortable:w,name:"change",toEl:t,newIndex:V,newDraggableIndex:de,originalEvent:e})}if(e.preventDefault!==void 0&&e.cancelable&&e.preventDefault(),a=te(a,s.draggable,t,!0),S("dragOver"),b.eventCanceled)return d;if(p.contains(e.target)||a.animated&&a.animatingX&&a.animatingY||w._ignoreWhileAnimating===a)return v(!1);if(st=!1,c&&!s.disabled&&(u?m||(r=O!==N):z===this||(this.lastPutMode=Ze.checkPull(this,c,p,e))&&l.checkPut(this,c,p,e))){if(k=this._getDirection(e,a)==="vertical",i=R(p),S("dragOverValid"),b.eventCanceled)return d;if(r)return O=N,C(),this._hideClone(),S("revert"),b.eventCanceled||(we?N.insertBefore(p,we):N.appendChild(p)),v(!0);var M=Ct(t,s.draggable);if(!M||Na(e,k,this)&&!M.animated){if(M===p)return v(!1);if(M&&t===e.target&&(a=M),a&&(o=R(a)),et(N,t,p,i,a,o,e,!!a)!==!1)return C(),M&&M.nextSibling?t.insertBefore(p,M.nextSibling):t.appendChild(p),O=t,E(),v(!0)}else if(M&&Ma(e,k,this)){var f=Te(t,0,s,!0);if(f===p)return v(!1);if(a=f,o=R(a),et(N,t,p,i,a,o,e,!1)!==!1)return C(),t.insertBefore(p,f),O=t,E(),v(!0)}else if(a.parentNode===t){o=R(a);var g=0,q,K=p.parentNode!==t,I=!Ea(p.animated&&p.toRect||i,a.animated&&a.toRect||o,k),ae=k?"top":"left",Q=Wt(a,"top","top")||Wt(p,"top","top"),pe=Q?Q.scrollTop:void 0;Ee!==a&&(q=o[ae],We=!1,Je=!I&&s.invertSwap||K),g=Aa(e,a,o,k,I?1:s.swapThreshold,s.invertedSwapThreshold==null?s.swapThreshold:s.invertedSwapThreshold,Je,Ee===a);var Z;if(g!==0){var oe=J(p);do oe-=g,Z=O.children[oe];while(Z&&(_(Z,"display")==="none"||Z===x))}if(g===0||Z===a)return v(!1);Ee=a,Be=g;var me=a.nextElementSibling,Y=!1;Y=g===1;var ge=et(N,t,p,i,a,o,e,Y);if(ge!==!1)return(ge===1||ge===-1)&&(Y=ge===1),kt=!0,setTimeout(Ta,30),C(),Y&&!me?t.appendChild(p):a.parentNode.insertBefore(p,Y?me:a),Q&&ea(Q,0,pe-Q.scrollTop),O=p.parentNode,q!==void 0&&!Je&&(nt=Math.abs(q-R(a)[ae])),E(),v(!0)}if(t.contains(p))return v(!1)}return!1},_ignoreWhileAnimating:null,_offMoveEvents:function(){$(document,"mousemove",this._onTouchMove),$(document,"touchmove",this._onTouchMove),$(document,"pointermove",this._onTouchMove),$(document,"dragover",ye),$(document,"mousemove",ye),$(document,"touchmove",ye)},_offUpEvents:function(){var e=this.el.ownerDocument;$(e,"mouseup",this._onDrop),$(e,"touchend",this._onDrop),$(e,"pointerup",this._onDrop),$(e,"pointercancel",this._onDrop),$(e,"touchcancel",this._onDrop),$(document,"selectstart",this)},_onDrop:function(e){var t=this.el,a=this.options;if(V=J(p),de=J(p,a.draggable),U("drop",this,{evt:e}),O=p&&p.parentNode,V=J(p),de=J(p,a.draggable),b.eventCanceled){this._nulling();return}$e=!1,Je=!1,We=!1,clearInterval(this._loopId),clearTimeout(this._dragStartTimer),St(this.cloneId),St(this._dragStartId),this.nativeDraggable&&($(document,"drop",this),$(t,"dragstart",this._onDragStart)),this._offMoveEvents(),this._offUpEvents(),Le&&_(document.body,"user-select",""),_(p,"transform",""),e&&(Re&&(e.cancelable&&e.preventDefault(),!a.dropBubble&&e.stopPropagation()),x&&x.parentNode&&x.parentNode.removeChild(x),(N===O||z&&z.lastPutMode!=="clone")&&A&&A.parentNode&&A.parentNode.removeChild(A),p&&(this.nativeDraggable&&$(p,"dragend",this),vt(p),p.style["will-change"]="",Re&&!$e&&X(p,z?z.options.ghostClass:this.options.ghostClass,!1),X(p,this.options.chosenClass,!1),W({sortable:this,name:"unchoose",toEl:O,newIndex:null,newDraggableIndex:null,originalEvent:e}),N!==O?(V>=0&&(W({rootEl:O,name:"add",toEl:O,fromEl:N,originalEvent:e}),W({sortable:this,name:"remove",toEl:O,originalEvent:e}),W({rootEl:O,name:"sort",toEl:O,fromEl:N,originalEvent:e}),W({sortable:this,name:"sort",toEl:O,originalEvent:e})),z&&z.save()):V!==De&&V>=0&&(W({sortable:this,name:"update",toEl:O,originalEvent:e}),W({sortable:this,name:"sort",toEl:O,originalEvent:e})),b.active&&((V==null||V===-1)&&(V=De,de=je),W({sortable:this,name:"end",toEl:O,originalEvent:e}),this.save()))),this._nulling()},_nulling:function(){U("nulling",this),N=p=O=x=we=A=at=ue=ve=ee=Re=V=de=De=je=Ee=Be=z=Ze=b.dragged=b.ghost=b.clone=b.active=null,ct.forEach(function(e){e.checked=!0}),ct.length=ft=_t=0},handleEvent:function(e){switch(e.type){case"drop":case"dragend":this._onDrop(e);break;case"dragenter":case"dragover":p&&(this._onDragOver(e),Ca(e));break;case"selectstart":e.preventDefault();break}},toArray:function(){for(var e=[],t,a=this.el.children,i=0,o=a.length,r=this.options;i<o;i++)t=a[i],te(t,r.draggable,this.el,!1)&&e.push(t.getAttribute(r.dataIdAttr)||Ia(t));return e},sort:function(e,t){var a={},i=this.el;this.toArray().forEach(function(o,r){var s=i.children[r];te(s,this.options.draggable,i,!1)&&(a[o]=s)},this),t&&this.captureAnimationState(),e.forEach(function(o){a[o]&&(i.removeChild(a[o]),i.appendChild(a[o]))}),t&&this.animateAll()},save:function(){var e=this.options.store;e&&e.set&&e.set(this)},closest:function(e,t){return te(e,t||this.options.draggable,this.el,!1)},option:function(e,t){var a=this.options;if(t===void 0)return a[e];var i=He.modifyOption(this,e,t);typeof i<"u"?a[e]=i:a[e]=t,e==="group"&&oa(a)},destroy:function(){U("destroy",this);var e=this.el;e[G]=null,$(e,"mousedown",this._onTapStart),$(e,"touchstart",this._onTapStart),$(e,"pointerdown",this._onTapStart),this.nativeDraggable&&($(e,"dragover",this),$(e,"dragenter",this)),Array.prototype.forEach.call(e.querySelectorAll("[draggable]"),function(t){t.removeAttribute("draggable")}),this._onDrop(),this._disableDelayedDragEvents(),lt.splice(lt.indexOf(this.el),1),this.el=e=null},_hideClone:function(){if(!ue){if(U("hideClone",this),b.eventCanceled)return;_(A,"display","none"),this.options.removeCloneOnHide&&A.parentNode&&A.parentNode.removeChild(A),ue=!0}},_showClone:function(e){if(e.lastPutMode!=="clone"){this._hideClone();return}if(ue){if(U("showClone",this),b.eventCanceled)return;p.parentNode==N&&!this.options.group.revertClone?N.insertBefore(A,p):we?N.insertBefore(A,we):N.appendChild(A),this.options.group.revertClone&&this.animate(p,A),_(A,"display",""),ue=!1}}};function Ca(n){n.dataTransfer&&(n.dataTransfer.dropEffect="move"),n.cancelable&&n.preventDefault()}function et(n,e,t,a,i,o,r,s){var l,c=n[G],u=c.options.onMove,m;return window.CustomEvent&&!le&&!Ye?l=new CustomEvent("move",{bubbles:!0,cancelable:!0}):(l=document.createEvent("Event"),l.initEvent("move",!0,!0)),l.to=e,l.from=n,l.dragged=t,l.draggedRect=a,l.related=i||e,l.relatedRect=o||R(e),l.willInsertAfter=s,l.originalEvent=r,n.dispatchEvent(l),u&&(m=u.call(c,l,r)),m}function vt(n){n.draggable=!1}function Ta(){kt=!1}function Ma(n,e,t){var a=R(Te(t.el,0,t.options,!0)),i=aa(t.el,t.options,x),o=10;return e?n.clientX<i.left-o||n.clientY<a.top&&n.clientX<a.right:n.clientY<i.top-o||n.clientY<a.bottom&&n.clientX<a.left}function Na(n,e,t){var a=R(Ct(t.el,t.options.draggable)),i=aa(t.el,t.options,x),o=10;return e?n.clientX>i.right+o||n.clientY>a.bottom&&n.clientX>a.left:n.clientY>i.bottom+o||n.clientX>a.right&&n.clientY>a.top}function Aa(n,e,t,a,i,o,r,s){var l=a?n.clientY:n.clientX,c=a?t.height:t.width,u=a?t.top:t.left,m=a?t.bottom:t.right,y=!1;if(!r){if(s&&nt<c*i){if(!We&&(Be===1?l>u+c*o/2:l<m-c*o/2)&&(We=!0),We)y=!0;else if(Be===1?l<u+nt:l>m-nt)return-Be}else if(l>u+c*(1-i)/2&&l<m-c*(1-i)/2)return Oa(e)}return y=y||r,y&&(l<u+c*o/2||l>m-c*o/2)?l>u+c/2?1:-1:0}function Oa(n){return J(p)<J(n)?1:-1}function Ia(n){for(var e=n.tagName+n.className+n.src+n.href+n.textContent,t=e.length,a=0;t--;)a+=e.charCodeAt(t);return a.toString(36)}function Pa(n){ct.length=0;for(var e=n.getElementsByTagName("input"),t=e.length;t--;){var a=e[t];a.checked&&ct.push(a)}}function it(n){return setTimeout(n,0)}function St(n){return clearTimeout(n)}ut&&D(document,"touchmove",function(n){(b.active||$e)&&n.cancelable&&n.preventDefault()});b.utils={on:D,off:$,css:_,find:Jt,is:function(e,t){return!!te(e,t,e,!1)},extend:_a,throttle:Qt,closest:te,toggleClass:X,clone:ta,index:J,nextTick:it,cancelNextTick:St,detectDirection:ia,getChild:Te,expando:G};b.get=function(n){return n[G]};b.mount=function(){for(var n=arguments.length,e=new Array(n),t=0;t<n;t++)e[t]=arguments[t];e[0].constructor===Array&&(e=e[0]),e.forEach(function(a){if(!a.prototype||!a.prototype.constructor)throw"Sortable: Mounted plugin must be a constructor function, not ".concat({}.toString.call(a));a.utils&&(b.utils=ie(ie({},b.utils),a.utils)),He.mount(a)})};b.create=function(n,e){return new b(n,e)};b.version=ga;var P=[],qe,Et,$t=!1,yt,wt,dt,Fe;function Ra(){function n(){this.defaults={scroll:!0,forceAutoScrollFallback:!1,scrollSensitivity:30,scrollSpeed:10,bubbleScroll:!0};for(var e in this)e.charAt(0)==="_"&&typeof this[e]=="function"&&(this[e]=this[e].bind(this))}return n.prototype={dragStarted:function(t){var a=t.originalEvent;this.sortable.nativeDraggable?D(document,"dragover",this._handleAutoScroll):this.options.supportPointer?D(document,"pointermove",this._handleFallbackAutoScroll):a.touches?D(document,"touchmove",this._handleFallbackAutoScroll):D(document,"mousemove",this._handleFallbackAutoScroll)},dragOverCompleted:function(t){var a=t.originalEvent;!this.options.dragOverBubble&&!a.rootEl&&this._handleAutoScroll(a)},drop:function(){this.sortable.nativeDraggable?$(document,"dragover",this._handleAutoScroll):($(document,"pointermove",this._handleFallbackAutoScroll),$(document,"touchmove",this._handleFallbackAutoScroll),$(document,"mousemove",this._handleFallbackAutoScroll)),Xt(),ot(),ba()},nulling:function(){dt=Et=qe=$t=Fe=yt=wt=null,P.length=0},_handleFallbackAutoScroll:function(t){this._handleAutoScroll(t,!0)},_handleAutoScroll:function(t,a){var i=this,o=(t.touches?t.touches[0]:t).clientX,r=(t.touches?t.touches[0]:t).clientY,s=document.elementFromPoint(o,r);if(dt=t,a||this.options.forceAutoScrollFallback||Ye||le||Le){xt(t,this.options,s,a);var l=he(s,!0);$t&&(!Fe||o!==yt||r!==wt)&&(Fe&&Xt(),Fe=setInterval(function(){var c=he(document.elementFromPoint(o,r),!0);c!==l&&(l=c,ot()),xt(t,i.options,c,a)},10),yt=o,wt=r)}else{if(!this.options.bubbleScroll||he(s,!0)===ne()){ot();return}xt(t,this.options,he(s,!1),!1)}}},se(n,{pluginName:"scroll",initializeByDefault:!0})}function ot(){P.forEach(function(n){clearInterval(n.pid)}),P=[]}function Xt(){clearInterval(Fe)}var xt=Qt(function(n,e,t,a){if(e.scroll){var i=(n.touches?n.touches[0]:n).clientX,o=(n.touches?n.touches[0]:n).clientY,r=e.scrollSensitivity,s=e.scrollSpeed,l=ne(),c=!1,u;Et!==t&&(Et=t,ot(),qe=e.scroll,u=e.scrollFn,qe===!0&&(qe=he(t,!0)));var m=0,y=qe;do{var k=y,w=R(k),d=w.top,S=w.bottom,C=w.left,v=w.right,E=w.width,M=w.height,f=void 0,g=void 0,q=k.scrollWidth,K=k.scrollHeight,I=_(k),ae=k.scrollLeft,Q=k.scrollTop;k===l?(f=E<q&&(I.overflowX==="auto"||I.overflowX==="scroll"||I.overflowX==="visible"),g=M<K&&(I.overflowY==="auto"||I.overflowY==="scroll"||I.overflowY==="visible")):(f=E<q&&(I.overflowX==="auto"||I.overflowX==="scroll"),g=M<K&&(I.overflowY==="auto"||I.overflowY==="scroll"));var pe=f&&(Math.abs(v-i)<=r&&ae+E<q)-(Math.abs(C-i)<=r&&!!ae),Z=g&&(Math.abs(S-o)<=r&&Q+M<K)-(Math.abs(d-o)<=r&&!!Q);if(!P[m])for(var oe=0;oe<=m;oe++)P[oe]||(P[oe]={});(P[m].vx!=pe||P[m].vy!=Z||P[m].el!==k)&&(P[m].el=k,P[m].vx=pe,P[m].vy=Z,clearInterval(P[m].pid),(pe!=0||Z!=0)&&(c=!0,P[m].pid=setInterval(function(){a&&this.layer===0&&b.active._onTouchMove(dt);var me=P[this.layer].vy?P[this.layer].vy*s:0,Y=P[this.layer].vx?P[this.layer].vx*s:0;typeof u=="function"&&u.call(b.dragged.parentNode[G],Y,me,n,dt,P[this.layer].el)!=="continue"||ea(P[this.layer].el,Y,me)}.bind({layer:m}),24))),m++}while(e.bubbleScroll&&y!==l&&(y=he(y,!1)));$t=c}},30),la=function(e){var t=e.originalEvent,a=e.putSortable,i=e.dragEl,o=e.activeSortable,r=e.dispatchSortableEvent,s=e.hideGhostForTarget,l=e.unhideGhostForTarget;if(t){var c=a||o;s();var u=t.changedTouches&&t.changedTouches.length?t.changedTouches[0]:t,m=document.elementFromPoint(u.clientX,u.clientY);l(),c&&!c.el.contains(m)&&(r("spill"),this.onSpill({dragEl:i,putSortable:a}))}};function Tt(){}Tt.prototype={startIndex:null,dragStart:function(e){var t=e.oldDraggableIndex;this.startIndex=t},onSpill:function(e){var t=e.dragEl,a=e.putSortable;this.sortable.captureAnimationState(),a&&a.captureAnimationState();var i=Te(this.sortable.el,this.startIndex,this.options);i?this.sortable.el.insertBefore(t,i):this.sortable.el.appendChild(t),this.sortable.animateAll(),a&&a.animateAll()},drop:la};se(Tt,{pluginName:"revertOnSpill"});function Mt(){}Mt.prototype={onSpill:function(e){var t=e.dragEl,a=e.putSortable,i=a||this.sortable;i.captureAnimationState(),t.parentNode&&t.parentNode.removeChild(t),i.animateAll()},drop:la};se(Mt,{pluginName:"removeOnSpill"});b.mount(new Ra);b.mount(Mt,Tt);var ca=b;var Nt=class extends HTMLElement{constructor(){super(),this.attachShadow({mode:"open"}),this._state=null,this._assignees=[],this._year=new Date().getFullYear(),this._month=null,this._loading=!1,this._error=null,this._initialized=!1,this._defaultViewApplied=!1,this._currentMonthRequested=!1,this._hasConnected=!1,this._listeningForNavigation=!1,this._stickyFirstColumn=this._loadStickyFirstColumnPreference(),this._showPastMonths=this._loadShowPastMonthsPreference(),this._matrixEditMode=!1,this._handleLocationChanged=()=>{this._isBudgetRoute()&&this._showCurrentMonth()}}set hass(e){let t=this._hass?JSON.stringify([this._hass.locale?.language,this._hass.locale?.date_format,this._hass.locale?.time_format,this._hass.locale?.time_zone,this._hass.config?.time_zone]):null;this._hass=e,!this._initialized&&e?(this._year=this._currentDateParts().year,this._initialized=!0,this._load()):e&&t!==JSON.stringify([e.locale?.language,e.locale?.date_format,e.locale?.time_format,e.locale?.time_zone,e.config?.time_zone])&&this._render()}set narrow(e){let t=this._narrow!==!!e;this._narrow=!!e,t&&this._initialized&&this._render()}set panel(e){this._panel=e}connectedCallback(){this._listeningForNavigation||(window.addEventListener("location-changed",this._handleLocationChanged),window.addEventListener("popstate",this._handleLocationChanged),this._listeningForNavigation=!0),this._hasConnected&&this._showCurrentMonth(),this._hasConnected=!0,this._render()}disconnectedCallback(){this._destroyPlanSortable(),window.removeEventListener("location-changed",this._handleLocationChanged),window.removeEventListener("popstate",this._handleLocationChanged),this._listeningForNavigation=!1}_isBudgetRoute(){return window.location.pathname==="/budget-manager"||window.location.pathname.startsWith("/budget-manager/")}_loadStickyFirstColumnPreference(){try{let e=window.localStorage.getItem("budget-manager-sticky-first-column");if(e!==null)return e==="true"}catch{}return!window.matchMedia?.("(max-width: 700px)").matches}_toggleStickyFirstColumn(){this._stickyFirstColumn=!this._stickyFirstColumn;try{window.localStorage.setItem("budget-manager-sticky-first-column",String(this._stickyFirstColumn))}catch{}this._render()}_loadShowPastMonthsPreference(){try{let e=window.localStorage.getItem("budget-manager-show-past-months");if(e!==null)return e==="true"}catch{}return!0}_togglePastMonths(){this._showPastMonths=!this._showPastMonths;try{window.localStorage.setItem("budget-manager-show-past-months",String(this._showPastMonths))}catch{}this._render()}_showCurrentMonth(){this._defaultViewApplied=!1,this._currentMonthRequested=!0,this._month=null;let e=this._state?.current_month;if(!e){this._currentMonthRequested=!1,this._render();return}let t=Number(e.slice(0,4));if(this._state.months[e]){this._year=t,this._month=e,this._defaultViewApplied=!0,this._currentMonthRequested=!1,this._render();return}this._loading||this._load(t)}async _load(e=this._year){if(!(!this._hass||this._loading)){this._loading=!0,this._error=null,this._render();try{let[t,a]=await Promise.all([this._hass.callWS({type:"budget_manager/get_state",year:e}),this._canEdit?this._hass.callWS({type:"budget_manager/notification_assignees"}).catch(()=>[]):Promise.resolve([])]);this._state=t,this._assignees=a,this._year=t.selected_year,this._month&&!t.months[this._month]&&(this._month=null),(!this._defaultViewApplied||this._currentMonthRequested)&&(t.current_month&&t.months[t.current_month]?(this._month=t.current_month,this._year=Number(t.current_month.slice(0,4)),this._defaultViewApplied=!0,this._currentMonthRequested=!1):t.current_month?this._currentMonthRequested=!0:t.current_month||(this._defaultViewApplied=!0,this._currentMonthRequested=!1))}catch(t){this._error=t?.message||String(t)}finally{this._loading=!1,this._render();let t=this._state?.current_month;if(this._currentMonthRequested&&t&&!this._state.months[t]){let a=Number(t.slice(0,4));a!==this._year&&this._load(a)}}}}get _canEdit(){return!!this._hass?.user?.is_admin}_money(e){let t=this._state?.settings?.currency||"EUR";return new Intl.NumberFormat(this._state?.settings?.locale||"en-GB",{style:"currency",currency:t,minimumFractionDigits:2}).format(Number(e||0))}_localeLanguage(){return this._hass?.locale?.language||this._hass?.language||this._state?.settings?.locale||window.navigator?.language||"en-GB"}_resolvedTimeZone(){return this._hass?.locale?.time_zone==="local"?Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC":this._hass?.config?.time_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC"}_currentDateParts(){let e=new Intl.DateTimeFormat("en-CA",{year:"numeric",month:"2-digit",day:"2-digit",timeZone:this._resolvedTimeZone()}).formatToParts(new Date),t=a=>Number(e.find(i=>i.type===a)?.value||0);return{year:t("year"),month:t("month"),day:t("day")}}_dateOnly(e){let t=String(e||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);return t?new Date(Date.UTC(Number(t[1]),Number(t[2])-1,Number(t[3]),12)):null}_formatDate(e){let t=this._dateOnly(e);if(!t)return String(e||"");let a=this._hass?.locale||{},i=a.date_format==="system"?void 0:this._localeLanguage(),o=new Intl.DateTimeFormat(i,{year:"numeric",month:"numeric",day:"numeric",timeZone:"UTC"});if(!["DMY","MDY","YMD"].includes(a.date_format))return o.format(t);let r=o.formatToParts(t),s=r.find(u=>u.type==="literal")?.value||"/",l=Object.fromEntries(r.filter(u=>["day","month","year"].includes(u.type)).map(u=>[u.type,u.value]));return{DMY:["day","month","year"],MDY:["month","day","year"],YMD:["year","month","day"]}[a.date_format].map(u=>l[u]).join(s)}_formatDateRange(e,t){return e?!t||e===t?this._formatDate(e):`${this._formatDate(e)} \u2013 ${this._formatDate(t)}`:""}_formatDateTime(e){let t=new Date(e);if(!Number.isFinite(t.getTime()))return String(e||"");let a=this._hass?.locale||{},i=a.time_format==="12"?"h12":a.time_format==="24"?"h23":void 0,o=this._resolvedTimeZone(),r=new Intl.DateTimeFormat("en-CA",{year:"numeric",month:"2-digit",day:"2-digit",timeZone:o}).formatToParts(t),s=u=>r.find(m=>m.type===u)?.value||"",l=`${s("year")}-${s("month")}-${s("day")}`,c=new Intl.DateTimeFormat(a.time_format==="system"?void 0:this._localeLanguage(),{hour:"numeric",minute:"2-digit",hourCycle:i,timeZone:o}).format(t);return`${this._formatDate(l)} ${c}`}_formatClockTime(e){let t=String(e||"").match(/^([01]\d|2[0-3]):([0-5]\d)$/);if(!t)return String(e||"");let a=this._hass?.locale||{},i=a.time_format==="12"?"h12":a.time_format==="24"?"h23":void 0;return new Intl.DateTimeFormat(a.time_format==="system"?void 0:this._localeLanguage(),{hour:"numeric",minute:"2-digit",hourCycle:i,timeZone:"UTC"}).format(new Date(Date.UTC(2e3,0,1,Number(t[1]),Number(t[2]))))}_esc(e){return String(e??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}_monthLabel(e){let[t,a]=e.split("-").map(Number);return new Intl.DateTimeFormat(this._localeLanguage(),{month:"long",year:"numeric",timeZone:"UTC"}).format(new Date(Date.UTC(t,a-1,1,12)))}_monthName(e,t="long"){let[a,i]=e.split("-").map(Number);return new Intl.DateTimeFormat(this._localeLanguage(),{month:t,timeZone:"UTC"}).format(new Date(Date.UTC(a,i-1,1,12)))}_incomeWorkingMonth(e,t){if(t!=="previous_month")return e;let[a,i]=e.split("-").map(Number),o=i===1?a-1:a,r=i===1?12:i-1;return`${o}-${String(r).padStart(2,"0")}`}_render(){if(!this.shadowRoot)return;this._destroyPlanSortable();let e=this._error?`<div class="empty error">${this._esc(this._error)}</div>`:this._state?this._month?this._renderMonth(this._state.months[this._month]):this._renderYear():'<div class="empty">Loading budget\u2026</div>';this.shadowRoot.innerHTML=`
       <style>${this._styles()}</style>
-      <div class="app ${this._loading ? "is-loading" : ""}">
-        <ha-top-app-bar-fixed ${this._narrow ? "narrow" : ""}>
+      <div class="app ${this._loading?"is-loading":""}">
+        <ha-top-app-bar-fixed ${this._narrow?"narrow":""}>
           ${this._renderHeader()}
-          <main>${body}</main>
+          <main>${e}</main>
         </ha-top-app-bar-fixed>
         <div id="modal-root"></div>
         <div id="toast" role="status"></div>
-      </div>`;
-    this._bindEvents();
-  }
-
-  _renderHeader() {
-    if (!this._state) {
-      return `<div slot="title" class="native-title"><strong>Budget Manager</strong><small>Local Home Assistant budget</small></div>`;
-    }
-    return `
+      </div>`,this._bindEvents()}_renderHeader(){return this._state?`
       <div slot="title" class="native-title">
         <strong>Budget Manager</strong>
-        <small>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</small>
+        <small>${this._month?this._monthLabel(this._month):`Plan ${this._year}\u2013${this._year+1}`}</small>
       </div>
-      <div slot="actionItems" class="header-actions ${this._month ? "month-header" : "plan-header"}">
-          ${this._month ? `<button class="app-bar-button" data-action="back-year">← Plan</button>` : ""}
-          ${this._canEdit ? `<button class="app-bar-button settings-action" data-action="settings">Settings</button>` : ""}
-          ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
-          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh">↻</button>
-      </div>`;
-  }
-
-  _renderYear() {
-    const yearState = this._state.year;
-    return `
+      <div slot="actionItems" class="header-actions ${this._month?"month-header":"plan-header"}">
+          ${this._month?'<button class="app-bar-button" data-action="back-year">\u2190 Plan</button>':""}
+          ${this._canEdit?'<button class="app-bar-button settings-action" data-action="settings">Settings</button>':""}
+          ${this._canEdit?"":'<span class="read-only">Read only</span>'}
+          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh">\u21BB</button>
+      </div>`:'<div slot="title" class="native-title"><strong>Budget Manager</strong><small>Local Home Assistant budget</small></div>'}_renderYear(){let e=this._state.year;return`
       <section class="year-toolbar">
         <div class="year-switcher">
-          <button class="icon-button" data-action="prev-year">‹</button>
-          <button class="year-button" data-action="choose-year">${this._year}–${this._year + 1}</button>
-          <button class="icon-button" data-action="next-year">›</button>
+          <button class="icon-button" data-action="prev-year">\u2039</button>
+          <button class="year-button" data-action="choose-year">${this._year}\u2013${this._year+1}</button>
+          <button class="icon-button" data-action="next-year">\u203A</button>
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="quiet" data-action="create-month">＋ Month</button>
-          <button class="primary" data-action="create-year">Copy / create year</button></div>` : ""}
+        ${this._canEdit?`<div class="toolbar-actions"><button class="quiet" data-action="create-month">\uFF0B Month</button>
+          <button class="primary" data-action="create-year">Copy / create year</button></div>`:""}
       </section>
 
-      ${!(this._state.available_months || []).length ? `<section class="empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings">Open settings</button>` : ""}</section>` : ""}
+      ${(this._state.available_months||[]).length?"":`<section class="empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit?'<button class="primary" data-action="settings">Open settings</button>':""}</section>`}
 
       <section class="month-grid">
-        ${yearState.months.map((month) => this._renderMonthCard(month)).join("")}
+        ${e.months.map(t=>this._renderMonthCard(t)).join("")}
       </section>
 
-      ${this._renderYearMatrix()}`;
-  }
-
-  _metric(label, value, tone = "") {
-    return `<article class="metric ${tone}"><span>${label}</span><strong>${this._money(value)}</strong></article>`;
-  }
-
-  _renderMonthCard(month) {
-    if (!month.exists) {
-      return `<button class="month-card missing" data-action="create-specific-month" data-month="${month.month}">
-        <span class="month-name">${this._esc(this._monthName(month.month))}</span>
-        <span class="plus">＋</span><small>Create month</small>
-      </button>`;
-    }
-    return `<button class="month-card" data-action="open-month" data-month="${month.month}">
-      <div class="month-card-title"><span class="month-name">${this._esc(this._monthName(month.month))}</span><span>→</span></div>
+      ${this._renderYearMatrix()}`}_metric(e,t,a=""){return`<article class="metric ${a}"><span>${e}</span><strong>${this._money(t)}</strong></article>`}_renderMonthCard(e){return e.exists?`<button class="month-card" data-action="open-month" data-month="${e.month}">
+      <div class="month-card-title"><span class="month-name">${this._esc(this._monthName(e.month))}</span><span>\u2192</span></div>
       <dl>
-        <div><dt>Income</dt><dd>${this._money(month.expected_income)}</dd></div>
-        <div><dt>Expenses</dt><dd>${this._money(month.unpaid_expenses)}</dd></div>
+        <div><dt>Income</dt><dd>${this._money(e.expected_income)}</dd></div>
+        <div><dt>Expenses</dt><dd>${this._money(e.unpaid_expenses)}</dd></div>
       </dl>
       <div class="month-card-footer">
-        <span class="item-count">${month.pending_count} open · ${month.paid_count} complete</span>
-        <span class="rag-status ${month.rag}" aria-label="Daily allowance ${this._money(month.daily_allowance)} per day">${this._money(month.daily_allowance)}/day</span>
+        <span class="item-count">${e.pending_count} open \xB7 ${e.paid_count} complete</span>
+        <span class="rag-status ${e.rag}" aria-label="Daily allowance ${this._money(e.daily_allowance)} per day">${this._money(e.daily_allowance)}/day</span>
       </div>
-    </button>`;
-  }
-
-  _renderYearMatrix() {
-    const years = [this._year, this._year + 1];
-    const allMonths = years.flatMap((year) => Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`));
-    const currentMonth = this._state.current_month;
-    const months = this._showPastMonths || !currentMonth
-      ? allMonths
-      : allMonths.filter((monthKey) => monthKey >= currentMonth);
-    const visibleYears = years
-      .map((year) => ({ year, count: months.filter((monthKey) => monthKey.startsWith(`${year}-`)).length }))
-      .filter(({ count }) => count > 0);
-    const matrixActions = `<div class="matrix-title-actions">
-      <button class="quiet past-months-toggle ${this._showPastMonths ? "" : "active"}" data-action="toggle-past-months" aria-pressed="${!this._showPastMonths}">${this._showPastMonths ? "Hide past months" : "Show past months"}</button>
-      ${this._canEdit ? `<button class="quiet matrix-edit-toggle ${this._matrixEditMode ? "active" : ""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode ? "Done editing" : "Edit values"}</button>` : ""}
-    </div>`;
-    const sectionTitle = `<div class="section-title"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>${matrixActions}</div>`;
-    const rows = new Map();
-    for (const monthKey of months) {
-      const month = this._state.months[monthKey];
-      for (const item of month?.items || []) {
-        if (item.expense_type === "child_care_leave") continue;
-        if (!this._itemHasMonthlyValue(item) && !this._matrixEditMode) continue;
-        const generatedPeriod = item.generated_type === "tervisekassa_care_benefit"
-          ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
-          : "";
-        const rowName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
-        const key = `${item.kind}:${rowName}`;
-        if (!rows.has(key)) rows.set(key, {
-          name: rowName,
-          orderName: item.generated_type ? null : item.name,
-          kind: item.kind,
-          months: {},
-        });
-        rows.get(key).months[monthKey] = item;
-      }
-    }
-    const groups = [
-      { kind: "income", label: "Expected money in" },
-      { kind: "expense", label: "Expenditures" },
-      { kind: "savings", label: "Savings" },
-    ];
-    const planOrder = this._state.settings.plan_item_order || {};
-    const kindRank = { income: 0, expense: 1, savings: 2 };
-    const ordered = [...rows.values()].sort((a, b) => {
-      if (a.kind !== b.kind) return (kindRank[a.kind] ?? 9) - (kindRank[b.kind] ?? 9);
-      const custom = planOrder[a.kind] || [];
-      const left = a.orderName ? custom.indexOf(a.orderName) : -1;
-      const right = b.orderName ? custom.indexOf(b.orderName) : -1;
-      if (left >= 0 || right >= 0) {
-        if (left < 0) return 1;
-        if (right < 0) return -1;
-        if (left !== right) return left - right;
-      }
-      return a.name.localeCompare(b.name);
-    });
-    if (!ordered.length) {
-      if (this._showPastMonths) return "";
-      return `<section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">${sectionTitle}<div class="empty">No planned items in the visible months.</div></section>`;
-    }
-    const renderGroup = (group) => {
-      const groupRows = ordered.filter((row) => row.kind === group.kind);
-      if (!groupRows.length) return "";
-      const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
-      return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="kind-dot"></span>${group.label}</th></tr>${groupRows.map((row) => {
-        const orderIndex = reorderable.indexOf(row);
-        const controls = this._matrixEditMode && orderIndex >= 0
-          ? `<button type="button" class="plan-drag-handle" data-action="drag-plan-row" aria-label="Reorder ${this._esc(row.name)}" aria-pressed="false" title="Drag to reorder. Keyboard: Space, arrow keys, then Space to drop"><ha-icon icon="mdi:drag-horizontal-variant"></ha-icon></button>`
-          : "";
-        const orderData = orderIndex >= 0 ? ` data-plan-kind="${row.kind}" data-plan-order-name="${this._esc(row.orderName)}"` : "";
-        return `<tr class="${row.kind}"${orderData}>
-        <th title="${this._esc(row.name)}"><div class="plan-row-heading"><span class="plan-row-label"><span class="kind-dot"></span>${this._esc(row.name)}</span>${controls}</div></th>
-        ${months.map((key) => this._matrixCell(row, row.months[key], key)).join("")}
-      </tr>`;
-      }).join("")}`;
-    };
-    const itemColumnWidth = this._matrixEditMode ? 255 : 205;
-    return `
-      <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
-        ${sectionTitle}
+    </button>`:`<button class="month-card missing" data-action="create-specific-month" data-month="${e.month}">
+        <span class="month-name">${this._esc(this._monthName(e.month))}</span>
+        <span class="plus">\uFF0B</span><small>Create month</small>
+      </button>`}_renderYearMatrix(){let e=[this._year,this._year+1],t=e.flatMap(d=>Array.from({length:12},(S,C)=>`${d}-${String(C+1).padStart(2,"0")}`)),a=this._state.current_month,i=this._showPastMonths||!a?t:t.filter(d=>d>=a),o=e.map(d=>({year:d,count:i.filter(S=>S.startsWith(`${d}-`)).length})).filter(({count:d})=>d>0),r=`<div class="matrix-title-actions">
+      <button class="quiet past-months-toggle ${this._showPastMonths?"":"active"}" data-action="toggle-past-months" aria-pressed="${!this._showPastMonths}">${this._showPastMonths?"Hide past months":"Show past months"}</button>
+      ${this._canEdit?`<button class="quiet matrix-edit-toggle ${this._matrixEditMode?"active":""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode?"Done editing":"Edit values"}</button>`:""}
+    </div>`,s=`<div class="section-title"><div><h2>Plan ${e[0]}\u2013${e[1]}</h2><p>Current year followed by next year, left to right</p></div>${r}</div>`,l=new Map;for(let d of i){let S=this._state.months[d];for(let C of S?.items||[]){if(C.expense_type==="child_care_leave"||!this._itemHasMonthlyValue(C)&&!this._matrixEditMode)continue;let v=C.generated_type==="tervisekassa_care_benefit"?this._formatDateRange(C.generated?.period_start,C.generated?.period_end):"",E=v?`Tervisekassa care benefit \xB7 ${v}`:C.name,M=`${C.kind}:${E}`;l.has(M)||l.set(M,{name:E,orderName:C.generated_type?null:C.name,kind:C.kind,months:{}}),l.get(M).months[d]=C}}let c=[{kind:"income",label:"Expected money in"},{kind:"expense",label:"Expenditures"},{kind:"savings",label:"Savings"}],u=this._state.settings.plan_item_order||{},m={income:0,expense:1,savings:2},y=[...l.values()].sort((d,S)=>{if(d.kind!==S.kind)return(m[d.kind]??9)-(m[S.kind]??9);let C=u[d.kind]||[],v=d.orderName?C.indexOf(d.orderName):-1,E=S.orderName?C.indexOf(S.orderName):-1;if(v>=0||E>=0){if(v<0)return 1;if(E<0)return-1;if(v!==E)return v-E}return d.name.localeCompare(S.name)});if(!y.length)return this._showPastMonths?"":`<section class="matrix-section ${this._stickyFirstColumn?"sticky-first-column":""}">${s}<div class="empty">No planned items in the visible months.</div></section>`;let k=d=>{let S=y.filter(v=>v.kind===d.kind);if(!S.length)return"";let C=S.filter(v=>v.orderName&&["income","expense"].includes(v.kind));return`<tr class="matrix-group ${d.kind}"><th colspan="${i.length+1}"><span class="kind-dot"></span>${d.label}</th></tr>${S.map(v=>{let E=C.indexOf(v),M=this._matrixEditMode&&E>=0?`<button type="button" class="plan-drag-handle" data-action="drag-plan-row" aria-label="Reorder ${this._esc(v.name)}" aria-pressed="false" title="Drag to reorder. Keyboard: Space, arrow keys, then Space to drop"><ha-icon icon="mdi:drag-horizontal-variant"></ha-icon></button>`:"",f=E>=0?` data-plan-kind="${v.kind}" data-plan-order-name="${this._esc(v.orderName)}"`:"";return`<tr class="${v.kind}"${f}>
+        <th title="${this._esc(v.name)}"><div class="plan-row-heading"><span class="plan-row-label"><span class="kind-dot"></span>${this._esc(v.name)}</span>${M}</div></th>
+        ${i.map(g=>this._matrixCell(v,v.months[g],g)).join("")}
+      </tr>`}).join("")}`},w=this._matrixEditMode?255:205;return`
+      <section class="matrix-section ${this._stickyFirstColumn?"sticky-first-column":""}">
+        ${s}
         <div class="matrix-wrap">
-          <table class="matrix" style="min-width:${itemColumnWidth + months.length * 74}px">
-            <colgroup><col class="item-column" style="width:${itemColumnWidth}px">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
+          <table class="matrix" style="min-width:${w+i.length*74}px">
+            <colgroup><col class="item-column" style="width:${w}px">${i.map(()=>'<col class="month-column">').join("")}</colgroup>
             <thead>
-              <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
-              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${this._esc(this._monthName(key, "short"))}</th>`).join("")}</tr>
+              <tr class="matrix-years"><th>Year</th>${o.map(({year:d,count:S})=>`<th colspan="${S}">${d}</th>`).join("")}</tr>
+              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn?"on":""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn?"Unpin first column":"Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${i.map(d=>`<th>${this._esc(this._monthName(d,"short"))}</th>`).join("")}</tr>
             </thead>
             <tbody>
-              ${groups.map(renderGroup).join("")}
-              <tr class="matrix-group summary"><th colspan="${months.length + 1}">Plan overview</th></tr>
-              ${this._matrixSummaryRow("Expected income", months, "expected_income")}
-              ${this._matrixSummaryRow("Open expenses", months, "unpaid_expenses")}
-              ${this._matrixSummaryRow("Open savings", months, "planned_savings", "savings")}
-              ${this._matrixSummaryRow("Forecast remaining", months, "remaining")}
-              ${this._matrixSummaryRow("EUR / day", months, "daily_allowance", "rag")}
+              ${c.map(k).join("")}
+              <tr class="matrix-group summary"><th colspan="${i.length+1}">Plan overview</th></tr>
+              ${this._matrixSummaryRow("Expected income",i,"expected_income")}
+              ${this._matrixSummaryRow("Open expenses",i,"unpaid_expenses")}
+              ${this._matrixSummaryRow("Open savings",i,"planned_savings","savings")}
+              ${this._matrixSummaryRow("Forecast remaining",i,"remaining")}
+              ${this._matrixSummaryRow("EUR / day",i,"daily_allowance","rag")}
             </tbody>
           </table>
         </div>
-      </section>`;
-  }
-
-  _matrixSummaryRow(label, months, key, tone = "") {
-    return `<tr class="summary-row ${tone}"><th>${label}</th>${months.map((monthKey) => {
-      const summary = this._state.months[monthKey]?.summary;
-      if (!summary) return `<td class="blank">—</td>`;
-      const navigation = this._matrixEditMode ? "" : ` data-action="open-month" data-month="${monthKey}"`;
-      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}"${navigation}>${this._money(summary[key])}</td>`;
-    }).join("")}</tr>`;
-  }
-
-  _matrixCell(row, item, monthKey) {
-    if (this._matrixEditMode && this._canEdit) {
-      if (row.kind === "savings" && this._state.settings.automatic_savings_enabled) {
-        if (!item) return `<td class="blank" title="Create this budget month to calculate savings">—</td>`;
-        const effective = Number(item.effective_amount ?? item.amount);
-        return `<td class="matrix-edit-cell automatic-savings-cell" title="Automatic savings is managed from Settings">${item.automatic_savings ? "Auto" : "Fixed"}<small>${this._money(effective)}</small></td>`;
-      }
-      const value = item ? Number(item.amount).toFixed(2) : "";
-      return `<td class="matrix-edit-cell ${item?.needs_review ? "needs-review" : ""}"><input class="matrix-amount-input" type="number" min="0" step="0.01" inputmode="decimal" value="${value}" data-action="edit-matrix-value" data-month="${monthKey}" data-item-id="${item?.id || ""}" data-name="${this._esc(row.name)}" data-kind="${row.kind}" data-original="${value}" aria-label="${this._esc(row.name)}, ${this._monthLabel(monthKey)} amount"></td>`;
-    }
-    if (!item) return `<td class="blank">—</td>`;
-    const complete = item.status === "paid" || item.status === "received";
-    const effective = Number(item.effective_amount ?? item.amount);
-    const adjusted = item.kind === "savings" && item.dynamic && !item.automatic_savings && effective !== Number(item.amount);
-    return `<td class="${item.special ? "special" : ""} ${complete ? "complete" : ""}" data-action="open-month" data-month="${monthKey}">
-      ${this._money(effective)}
-      ${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}
-      ${item.special ? `<small>${this._esc(item.special_label || "Renewal")}</small>` : ""}
-    </td>`;
-  }
-
-  _renderMonth(month) {
-    if (!month) return `<div class="empty">Month not found.</div>`;
-    const summary = month.summary;
-    const income = month.items.filter((item) => item.kind === "income" && this._itemHasMonthlyValue(item));
-    const expenses = month.items.filter((item) => item.kind === "expense" && (item.expense_type === "child_care_leave" || this._itemHasMonthlyValue(item)));
-    const savings = month.items.filter((item) => item.kind === "savings");
-    return `
+      </section>`}_matrixSummaryRow(e,t,a,i=""){return`<tr class="summary-row ${i}"><th>${e}</th>${t.map(o=>{let r=this._state.months[o]?.summary;if(!r)return'<td class="blank">\u2014</td>';let s=this._matrixEditMode?"":` data-action="open-month" data-month="${o}"`;return`<td class="${i==="rag"?`rag-cell ${r.rag}`:""}"${s}>${this._money(r[a])}</td>`}).join("")}</tr>`}_matrixCell(e,t,a){if(this._matrixEditMode&&this._canEdit){if(e.kind==="savings"&&this._state.settings.automatic_savings_enabled){if(!t)return'<td class="blank" title="Create this budget month to calculate savings">\u2014</td>';let l=Number(t.effective_amount??t.amount);return`<td class="matrix-edit-cell automatic-savings-cell" title="Automatic savings is managed from Settings">${t.automatic_savings?"Auto":"Fixed"}<small>${this._money(l)}</small></td>`}let s=t?Number(t.amount).toFixed(2):"";return`<td class="matrix-edit-cell ${t?.needs_review?"needs-review":""}"><input class="matrix-amount-input" type="number" min="0" step="0.01" inputmode="decimal" value="${s}" data-action="edit-matrix-value" data-month="${a}" data-item-id="${t?.id||""}" data-name="${this._esc(e.name)}" data-kind="${e.kind}" data-original="${s}" aria-label="${this._esc(e.name)}, ${this._monthLabel(a)} amount"></td>`}if(!t)return'<td class="blank">\u2014</td>';let i=t.status==="paid"||t.status==="received",o=Number(t.effective_amount??t.amount),r=t.kind==="savings"&&t.dynamic&&!t.automatic_savings&&o!==Number(t.amount);return`<td class="${t.special?"special":""} ${i?"complete":""}" data-action="open-month" data-month="${a}">
+      ${this._money(o)}
+      ${r?`<small>planned ${this._money(t.amount)}</small>`:""}
+      ${t.special?`<small>${this._esc(t.special_label||"Renewal")}</small>`:""}
+    </td>`}_renderMonth(e){if(!e)return'<div class="empty">Month not found.</div>';let t=e.summary,a=e.items.filter(r=>r.kind==="income"&&this._itemHasMonthlyValue(r)),i=e.items.filter(r=>r.kind==="expense"&&(r.expense_type==="child_care_leave"||this._itemHasMonthlyValue(r))),o=e.items.filter(r=>r.kind==="savings");return`
       <section class="month-toolbar">
         <div>
           <span class="eyebrow">Manual account balance</span>
-          ${this._canEdit ? `<button class="balance-value" data-action="edit-balance">${this._money(month.account_balance)} <small>edit</small></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
+          ${this._canEdit?`<button class="balance-value" data-action="edit-balance">${this._money(e.account_balance)} <small>edit</small></button>`:`<strong class="balance-value">${this._money(e.account_balance)}</strong>`}
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item">＋ Add item</button></div>` : ""}
+        ${this._canEdit?'<div class="toolbar-actions"><button class="primary" data-action="add-item">\uFF0B Add item</button></div>':""}
       </section>
       <section class="metrics">
-        ${this._metric("Expected income", summary.expected_income, "income")}
-        ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
-        ${this._metric("Open savings", summary.planned_savings, "savings")}
-        ${this._metric("Forecast remaining", summary.remaining, summary.remaining < 0 ? "danger" : "good")}
-        ${this._metric(`Per day · ${summary.days_divisor} days`, summary.daily_allowance, summary.rag)}
+        ${this._metric("Expected income",t.expected_income,"income")}
+        ${this._metric("Unpaid expenses",t.unpaid_expenses,"expense")}
+        ${this._metric("Open savings",t.planned_savings,"savings")}
+        ${this._metric("Forecast remaining",t.remaining,t.remaining<0?"danger":"good")}
+        ${this._metric(`Per day \xB7 ${t.days_divisor} days`,t.daily_allowance,t.rag)}
       </section>
-      ${this._renderItems("Expected money in", income, "income")}
-      ${this._renderItems("Expenditures", expenses, "expense")}
-      ${this._renderItems("Savings", savings, "savings")}
-      ${this._canEdit ? `<div class="danger-zone"><button class="danger-button" data-action="delete-month">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
-  }
-
-  _renderItems(title, items, kind) {
-    return `<section class="items-section">
-      <div class="section-title"><div><h2>${title}</h2><p>${items.filter((item) => item.status === "pending" && item.expense_type !== "child_care_leave").length} still open</p></div></div>
+      ${this._renderItems("Expected money in",a,"income")}
+      ${this._renderItems("Expenditures",i,"expense")}
+      ${this._renderItems("Savings",o,"savings")}
+      ${this._canEdit?`<div class="danger-zone"><button class="danger-button" data-action="delete-month">Delete ${this._monthLabel(e.month)}</button></div>`:""}`}_renderItems(e,t,a){return`<section class="items-section">
+      <div class="section-title"><div><h2>${e}</h2><p>${t.filter(i=>i.status==="pending"&&i.expense_type!=="child_care_leave").length} still open</p></div></div>
       <div class="items-list">
-        ${items.length ? items.map((item) => this._renderItem(item, kind)).join("") : `<div class="empty-row">No items</div>`}
+        ${t.length?t.map(i=>this._renderItem(i,a)).join(""):'<div class="empty-row">No items</div>'}
       </div>
-    </section>`;
-  }
-
-  _itemHasMonthlyValue(item) {
-    if (item.needs_review) return true;
-    if (item.kind === "savings" && item.dynamic) return true;
-    return Number(item.effective_amount ?? item.amount ?? 0) > 0;
-  }
-
-  _assigneeName(userId) {
-    return this._assignees.find((user) => user.id === userId)?.name || "Unavailable user";
-  }
-
-  _renderItem(item, kind) {
-    if (item.expense_type === "child_care_leave") {
-      const care = item.care_leave || {};
-      const periods = care.periods || [];
-      const totalBenefit = periods.reduce((total, period) => total + Number(period.calculation?.estimated_net_benefit || 0), 0);
-      const totalHours = periods.reduce((total, period) => total + Number(period.calculation?.missed_working_hours || 0), 0);
-      return `<article class="item care-leave-item">
+    </section>`}_itemHasMonthlyValue(e){return e.needs_review||e.kind==="savings"&&e.dynamic?!0:Number(e.effective_amount??e.amount??0)>0}_assigneeName(e){return this._assignees.find(t=>t.id===e)?.name||"Unavailable user"}_renderItem(e,t){if(e.expense_type==="child_care_leave"){let c=e.care_leave||{},u=c.periods||[],m=u.reduce((k,w)=>k+Number(w.calculation?.estimated_net_benefit||0),0),y=u.reduce((k,w)=>k+Number(w.calculation?.missed_working_hours||0),0);return`<article class="item care-leave-item">
         <span class="status-placeholder" aria-hidden="true"></span>
         <div class="item-main">
-          <div class="item-title">${this._esc(item.name)} <span class="badge care-badge">Care leave</span></div>
-          <div class="item-meta">${periods.length} ${periods.length === 1 ? "period" : "periods"} · ${this._esc(totalHours)} missed work hours · linked to ${this._esc(care.linked_income_name || "hourly income")} in ${this._monthLabel(care.income_month)}</div>
+          <div class="item-title">${this._esc(e.name)} <span class="badge care-badge">Care leave</span></div>
+          <div class="item-meta">${u.length} ${u.length===1?"period":"periods"} \xB7 ${this._esc(y)} missed work hours \xB7 linked to ${this._esc(c.linked_income_name||"hourly income")} in ${this._monthLabel(c.income_month)}</div>
         </div>
-        <strong class="item-amount care-benefit-total"><small>Est. benefit</small>${this._money(totalBenefit)}</strong>
-        ${this._canEdit ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Manage periods">•••</button>` : ""}
-      </article>`;
-    }
-    const complete = item.status === "paid" || item.status === "received";
-    const actionLabel = kind === "income" ? (complete ? "Received" : "Mark received") : (complete ? "Paid" : "Mark paid");
-    const amount = item.effective_amount ?? item.amount;
-    const adjusted = kind === "savings" && item.dynamic && !item.automatic_savings && Number(amount) !== Number(item.amount);
-    const generatedPeriod = item.generated_type === "tervisekassa_care_benefit"
-      ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
-      : "";
-    const displayName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
-    return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
-      <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
+        <strong class="item-amount care-benefit-total"><small>Est. benefit</small>${this._money(m)}</strong>
+        ${this._canEdit?`<button class="more-button" data-action="edit-item" data-id="${e.id}" title="Manage periods">\u2022\u2022\u2022</button>`:""}
+      </article>`}let a=e.status==="paid"||e.status==="received",i=t==="income"?a?"Received":"Mark received":a?"Paid":"Mark paid",o=e.effective_amount??e.amount,r=t==="savings"&&e.dynamic&&!e.automatic_savings&&Number(o)!==Number(e.amount),s=e.generated_type==="tervisekassa_care_benefit"?this._formatDateRange(e.generated?.period_start,e.generated?.period_end):"",l=s?`Tervisekassa care benefit \xB7 ${s}`:e.name;return`<article class="item ${a?"complete":""} ${e.needs_review?"needs-review":""}">
+      <button class="status-button ${a?"done":""}" data-action="toggle-status" data-id="${e.id}" data-kind="${t}" title="${i}">${a?"\u2713":""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.automatic_savings ? `<span class="badge savings-badge">Calculated</span>` : item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Adjusted</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(l)} ${e.needs_review?'<span class="badge review-badge">Needs review</span>':""} ${e.automatic_savings?'<span class="badge savings-badge">Calculated</span>':e.dynamic&&t==="savings"?'<span class="badge savings-badge">Adjusted</span>':""} ${e.generated_type==="tervisekassa_care_benefit"?'<span class="badge care-badge">Estimated</span>':""} ${e.special?`<span class="badge">${this._esc(e.special_label||"Renewal")}</span>`:""}</div>
         <div class="item-meta">
-          ${item.due_day ? `Day ${item.due_day}` : "No due day"}
-          ${item.category ? ` · ${this._esc(item.category)}` : ""}
-          ${item.assignee_user_id ? ` · assigned to ${this._esc(this._assigneeName(item.assignee_user_id))} · reminders from ${this._esc(this._formatClockTime(item.reminder_time || "09:00"))}` : ""}
-          ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(this._formatDate(item.recurrence_end))}` : " · one-time"}
-          ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
-          ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
-          ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
-          ${item.automatic_savings ? ` · calculated to leave ${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
+          ${e.due_day?`Day ${e.due_day}`:"No due day"}
+          ${e.category?` \xB7 ${this._esc(e.category)}`:""}
+          ${e.assignee_user_id?` \xB7 assigned to ${this._esc(this._assigneeName(e.assignee_user_id))} \xB7 reminders from ${this._esc(this._formatClockTime(e.reminder_time||"09:00"))}`:""}
+          ${e.recurrence!=="single"?` \xB7 ${this._esc(e.recurrence)} until ${this._esc(this._formatDate(e.recurrence_end))}`:" \xB7 one-time"}
+          ${e.income_calculation?` \xB7 Estonian hourly ${this._money(e.income_calculation.hourly_gross)}/h \xD7 ${this._esc(e.income_calculation.working_hours)} h \xB7 ${this._monthLabel(e.income_calculation.working_time_month||this._incomeWorkingMonth(this._month,e.income_calculation.work_period))} work period`:""}
+          ${Number(e.income_calculation?.care_leave_hours||0)>0?` \xB7 ${this._esc(e.income_calculation.care_leave_hours)} care-leave hours deducted \xB7 approx. net reduction ${this._money(e.income_calculation.care_leave_net_salary_reduction||0)}`:""}
+          ${s?` \xB7 Tervisekassa approximation for ${this._esc(s)}`:""}
+          ${e.automatic_savings?` \xB7 calculated to leave ${this._money(this._state.settings.savings_target_threshold??45)}/day`:e.dynamic&&t==="savings"?` \xB7 target range ${this._money(this._state.settings.savings_floor_threshold??40)}\u2013${this._money(this._state.settings.savings_target_threshold??45)}/day`:""}
         </div>
       </div>
-      <strong class="item-amount">${this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
-      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
-    </article>`;
-  }
-
-  _bindEvents() {
-    this.shadowRoot.querySelectorAll('[data-action]:not([data-action="edit-matrix-value"])').forEach((node) => {
-      node.addEventListener("click", (event) => this._handleAction(event));
-    });
-    this.shadowRoot.querySelectorAll('[data-action="drag-plan-row"]').forEach((handle) => {
-      handle.addEventListener("pointerdown", (event) => this._startPlanPointerDrag(event));
-      handle.addEventListener("keydown", (event) => this._handlePlanDragKeydown(event));
-    });
-    this.shadowRoot.querySelectorAll('[data-action="edit-matrix-value"]').forEach((input) => {
-      input.addEventListener("change", (event) => this._saveMatrixValue(event.currentTarget));
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
-        if (event.key === "Escape") { event.currentTarget.value = event.currentTarget.dataset.original; event.currentTarget.blur(); }
-      });
-    });
-  }
-
-  async _handleAction(event) {
-    const button = event.currentTarget;
-    const action = button.dataset.action;
-    if (action === "refresh") return this._load();
-    if (action === "back-year") { this._month = null; return this._render(); }
-    if (action === "prev-year") return this._load(this._year - 1);
-    if (action === "next-year") return this._load(this._year + 1);
-    if (action === "choose-year") return this._openYearPicker();
-    if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
-    if (action === "toggle-past-months") return this._togglePastMonths();
-    if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
-    if (action === "drag-plan-row") return;
-    if (action === "settings") return this._openSettings();
-    if (action === "open-month") {
-      if (this._matrixEditMode && button.closest(".matrix")) return;
-      this._month = button.dataset.month;
-      return this._render();
-    }
-    if (action === "create-month") return this._openCreateMonth();
-    if (action === "create-specific-month") return this._openCreateMonth(button.dataset.month);
-    if (action === "create-year") return this._openCreateYear();
-    if (action === "edit-balance") return this._openBalanceEditor();
-    if (action === "add-item") return this._openItemEditor();
-    if (action === "edit-item") return this._openItemEditor(button.dataset.id);
-    if (action === "toggle-status") return this._toggleStatus(button.dataset.id, button.dataset.kind);
-    if (action === "delete-month") return this._deleteMonth();
-  }
-
-  async _saveMatrixValue(input) {
-    if (input.dataset.saving === "true") return;
-    const rawValue = input.value.trim();
-    const original = input.dataset.original;
-    if (!input.dataset.itemId && rawValue === "") return;
-    const amount = rawValue === "" ? 0 : Number(rawValue);
-    if (!Number.isFinite(amount) || amount < 0) {
-      input.value = original;
-      return this._showError(new Error("Amount must be a non-negative number."));
-    }
-    if ((original === "" && amount === 0) || (original !== "" && amount === Number(original))) return;
-
-    const monthKey = input.dataset.month;
-    const month = this._state.months[monthKey];
-    const existing = input.dataset.itemId
-      ? month?.items.find((item) => item.id === input.dataset.itemId)
-      : null;
-    input.dataset.saving = "true";
-    input.disabled = true;
-    try {
-      if (!month) {
-        await this._hass.callWS({
-          type: "budget_manager/create_month",
-          target: monthKey,
-          source: null,
-          overwrite: false,
-        });
-      }
-      const saved = await this._hass.callWS({
-        type: "budget_manager/upsert_item",
-        month: monthKey,
-        scope: "this",
-        item: existing ? {
-          ...existing,
-          amount,
-          income_calculation: existing.kind === "income" ? null : existing.income_calculation,
-          needs_review: true,
-        } : {
-          name: input.dataset.name,
-          kind: input.dataset.kind,
-          amount,
-          due_day: null,
-          status: "pending",
-          category: "",
-          special: false,
-          special_label: "",
-          notes: "",
-          sort_order: 0,
-          recurrence: "single",
-          recurrence_end: null,
-          dynamic: input.dataset.kind === "savings",
-          needs_review: true,
-        },
-      });
-      const state = await this._hass.callWS({
-        type: "budget_manager/get_state",
-        year: this._year,
-      });
-      this._state = state;
-      this._year = state.selected_year;
-      input.dataset.itemId = saved.id;
-      input.dataset.original = amount.toFixed(2);
-      input.value = amount.toFixed(2);
-      input.disabled = false;
-      input.dataset.saving = "false";
-      this._showMessage("Value saved. Review its details in the month view.");
-    } catch (err) {
-      input.disabled = false;
-      input.dataset.saving = "false";
-      input.value = original;
-      this._showError(err);
-    }
-  }
-
-  _planRows(kind) {
-    return [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
-  }
-
-  _planRowOrder(kind) {
-    return this._planRows(kind).map((row) => row.dataset.planOrderName);
-  }
-
-  _movePlanRowElement(row, target, before) {
-    if (!row || !target || row === target || row.dataset.planKind !== target.dataset.planKind) return;
-    if (before) target.parentNode.insertBefore(row, target);
-    else target.parentNode.insertBefore(row, target.nextSibling);
-  }
-
-  _planRowAtPoint(kind, clientY) {
-    return this._planRows(kind).find((row) => {
-      const bounds = row.getBoundingClientRect();
-      return clientY >= bounds.top && clientY <= bounds.bottom;
-    });
-  }
-
-  _setPlanDragAppearance(row, handle, active) {
-    row?.classList.toggle("plan-row-dragging", active);
-    handle?.classList.toggle("active", active);
-    handle?.setAttribute("aria-pressed", String(active));
-  }
-
-  async _savePlanRowOrder(kind, originalOrder) {
-    const orderedNames = this._planRowOrder(kind);
-    if (orderedNames.join("\u0000") === originalOrder.join("\u0000")) return;
-    const handles = this._planRows(kind).map((row) => row.querySelector(".plan-drag-handle")).filter(Boolean);
-    handles.forEach((handle) => { handle.disabled = true; });
-    try {
-      const planItemOrder = await this._hass.callWS({
-        type: "budget_manager/update_plan_item_order",
-        kind,
-        names: orderedNames,
-      });
-      this._state.settings.plan_item_order = planItemOrder;
-      this._showMessage("Plan order saved.");
-    } catch (err) {
-      this._render();
-      this._showError(err);
-    } finally {
-      handles.forEach((handle) => { handle.disabled = false; });
-    }
-  }
-
-  _startPlanPointerDrag(event) {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    const handle = event.currentTarget;
-    const row = handle.closest("tr[data-plan-kind][data-plan-order-name]");
-    if (!row) return;
-    event.preventDefault();
-    const kind = row.dataset.planKind;
-    const originalOrder = this._planRowOrder(kind);
-    this._setPlanDragAppearance(row, handle, true);
-    handle.setPointerCapture?.(event.pointerId);
-
-    const move = (moveEvent) => {
-      if (moveEvent.pointerId !== event.pointerId) return;
-      moveEvent.preventDefault();
-      const target = this._planRowAtPoint(kind, moveEvent.clientY);
-      if (target && target !== row) {
-        const bounds = target.getBoundingClientRect();
-        this._movePlanRowElement(row, target, moveEvent.clientY < bounds.top + bounds.height / 2);
-      }
-      const wrap = this.shadowRoot.querySelector(".matrix-wrap");
-      const wrapBounds = wrap?.getBoundingClientRect();
-      if (wrapBounds && moveEvent.clientY < wrapBounds.top + 42) wrap.scrollTop -= 18;
-      else if (wrapBounds && moveEvent.clientY > wrapBounds.bottom - 42) wrap.scrollTop += 18;
-    };
-    const end = (endEvent) => {
-      if (endEvent.pointerId !== event.pointerId) return;
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", end);
-      handle.removeEventListener("pointercancel", cancel);
-      handle.releasePointerCapture?.(event.pointerId);
-      this._setPlanDragAppearance(row, handle, false);
-      this._savePlanRowOrder(kind, originalOrder);
-    };
-    const cancel = (cancelEvent) => {
-      if (cancelEvent.pointerId !== event.pointerId) return;
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", end);
-      handle.removeEventListener("pointercancel", cancel);
-      this._setPlanDragAppearance(row, handle, false);
-      this._render();
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", cancel);
-  }
-
-  _handlePlanDragKeydown(event) {
-    const handle = event.currentTarget;
-    const row = handle.closest("tr[data-plan-kind][data-plan-order-name]");
-    if (!row) return;
-    const active = handle.getAttribute("aria-pressed") === "true";
-    if (!active && (event.key === " " || event.key === "Enter")) {
-      event.preventDefault();
-      const kind = row.dataset.planKind;
-      this._keyboardPlanDrag = { row, handle, kind, originalOrder: this._planRowOrder(kind) };
-      this._setPlanDragAppearance(row, handle, true);
-      return;
-    }
-    if (!active) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      this._keyboardPlanDrag = null;
-      this._render();
-      return;
-    }
-    if (event.key === " " || event.key === "Enter") {
-      event.preventDefault();
-      const drag = this._keyboardPlanDrag;
-      this._keyboardPlanDrag = null;
-      this._setPlanDragAppearance(row, handle, false);
-      if (drag) this._savePlanRowOrder(drag.kind, drag.originalOrder);
-      return;
-    }
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    event.preventDefault();
-    const rows = this._planRows(row.dataset.planKind);
-    const index = rows.indexOf(row);
-    const targetIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
-    if (targetIndex < 0 || targetIndex >= rows.length) return;
-    const target = rows[targetIndex];
-    if (event.key === "ArrowUp") target.parentNode.insertBefore(row, target);
-    else target.parentNode.insertBefore(target, row);
-  }
-
-  _openSettings() {
-    const settings = this._state.settings;
-    const fields = `<fieldset class="settings-group"><legend>Budget cycle</legend><p class="form-help">Each budget month runs through this day of the following calendar month. Shorter months are clamped to their last day.</p>
-      ${this._field("Cycle end day", "cycle_end_day", settings.cycle_end_day ?? 2, "number", "min=1 max=31 step=1 required")}
+      <strong class="item-amount">${this._money(o)}${r?`<small>planned ${this._money(e.amount)}</small>`:""}</strong>
+      ${this._canEdit&&e.generated_type!=="tervisekassa_care_benefit"&&!(t==="savings"&&this._state.settings.automatic_savings_enabled)?`<button class="more-button" data-action="edit-item" data-id="${e.id}" title="Edit">\u2022\u2022\u2022</button>`:""}
+    </article>`}_bindEvents(){this.shadowRoot.querySelectorAll('[data-action]:not([data-action="edit-matrix-value"])').forEach(e=>{e.addEventListener("click",t=>this._handleAction(t))}),this.shadowRoot.querySelectorAll('[data-action="drag-plan-row"]').forEach(e=>{e.addEventListener("keydown",t=>this._handlePlanDragKeydown(t))}),this.shadowRoot.querySelectorAll('[data-action="edit-matrix-value"]').forEach(e=>{e.addEventListener("change",t=>this._saveMatrixValue(t.currentTarget)),e.addEventListener("keydown",t=>{t.key==="Enter"&&(t.preventDefault(),t.currentTarget.blur()),t.key==="Escape"&&(t.currentTarget.value=t.currentTarget.dataset.original,t.currentTarget.blur())})}),this._initPlanSortable()}async _handleAction(e){let t=e.currentTarget,a=t.dataset.action;if(a==="refresh")return this._load();if(a==="back-year")return this._month=null,this._render();if(a==="prev-year")return this._load(this._year-1);if(a==="next-year")return this._load(this._year+1);if(a==="choose-year")return this._openYearPicker();if(a==="toggle-sticky-column")return this._toggleStickyFirstColumn();if(a==="toggle-past-months")return this._togglePastMonths();if(a==="toggle-matrix-edit")return this._matrixEditMode=!this._matrixEditMode,this._render();if(a!=="drag-plan-row"){if(a==="settings")return this._openSettings();if(a==="open-month")return this._matrixEditMode&&t.closest(".matrix")?void 0:(this._month=t.dataset.month,this._render());if(a==="create-month")return this._openCreateMonth();if(a==="create-specific-month")return this._openCreateMonth(t.dataset.month);if(a==="create-year")return this._openCreateYear();if(a==="edit-balance")return this._openBalanceEditor();if(a==="add-item")return this._openItemEditor();if(a==="edit-item")return this._openItemEditor(t.dataset.id);if(a==="toggle-status")return this._toggleStatus(t.dataset.id,t.dataset.kind);if(a==="delete-month")return this._deleteMonth()}}async _saveMatrixValue(e){if(e.dataset.saving==="true")return;let t=e.value.trim(),a=e.dataset.original;if(!e.dataset.itemId&&t==="")return;let i=t===""?0:Number(t);if(!Number.isFinite(i)||i<0)return e.value=a,this._showError(new Error("Amount must be a non-negative number."));if(a===""&&i===0||a!==""&&i===Number(a))return;let o=e.dataset.month,r=this._state.months[o],s=e.dataset.itemId?r?.items.find(l=>l.id===e.dataset.itemId):null;e.dataset.saving="true",e.disabled=!0;try{r||await this._hass.callWS({type:"budget_manager/create_month",target:o,source:null,overwrite:!1});let l=await this._hass.callWS({type:"budget_manager/upsert_item",month:o,scope:"this",item:s?{...s,amount:i,income_calculation:s.kind==="income"?null:s.income_calculation,needs_review:!0}:{name:e.dataset.name,kind:e.dataset.kind,amount:i,due_day:null,status:"pending",category:"",special:!1,special_label:"",notes:"",sort_order:0,recurrence:"single",recurrence_end:null,dynamic:e.dataset.kind==="savings",needs_review:!0}}),c=await this._hass.callWS({type:"budget_manager/get_state",year:this._year});this._state=c,this._year=c.selected_year,e.dataset.itemId=l.id,e.dataset.original=i.toFixed(2),e.value=i.toFixed(2),e.disabled=!1,e.dataset.saving="false",this._showMessage("Value saved. Review its details in the month view.")}catch(l){e.disabled=!1,e.dataset.saving="false",e.value=a,this._showError(l)}}_planRows(e){return[...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${e}"][data-plan-order-name]`)]}_planRowOrder(e){return this._planRows(e).map(t=>t.dataset.planOrderName)}_movePlanRowElement(e,t,a){!e||!t||e===t||e.dataset.planKind!==t.dataset.planKind||(a?t.parentNode.insertBefore(e,t):t.parentNode.insertBefore(e,t.nextSibling))}_initPlanSortable(){if(!this._matrixEditMode||!this._canEdit||this._planSortable)return;let e=this.shadowRoot.querySelector(".matrix tbody");!e||!e.querySelector(".plan-drag-handle")||(this._planSortable=ca.create(e,{animation:150,handle:".plan-drag-handle",draggable:"tr[data-plan-kind][data-plan-order-name]",ghostClass:"plan-sort-ghost",chosenClass:"plan-sort-chosen",dragClass:"plan-sort-drag",fallbackClass:"plan-sort-fallback",fallbackTolerance:3,scroll:!0,forceAutoScrollFallback:!0,scrollSensitivity:56,scrollSpeed:20,onMove:t=>t.dragged.dataset.planKind===t.related?.dataset?.planKind,onStart:t=>{let a=t.item.dataset.planKind;this._sortablePlanDrag={kind:a,originalOrder:this._planRowOrder(a)}},onEnd:t=>{let a=this._sortablePlanDrag;this._sortablePlanDrag=null,t.item.classList.remove("plan-sort-ghost","plan-sort-chosen","plan-sort-drag","plan-sort-fallback"),a&&this._savePlanRowOrder(a.kind,a.originalOrder)}}),e.dataset.sortableReady="true")}_destroyPlanSortable(){this._planSortable?.destroy(),this._planSortable=null,this._sortablePlanDrag=null}_setPlanDragAppearance(e,t,a){e?.classList.toggle("plan-row-dragging",a),t?.classList.toggle("active",a),t?.setAttribute("aria-pressed",String(a))}async _savePlanRowOrder(e,t){let a=this._planRowOrder(e);if(a.join("\0")===t.join("\0"))return;let i=this._planRows(e).map(o=>o.querySelector(".plan-drag-handle")).filter(Boolean);i.forEach(o=>{o.disabled=!0});try{let o=await this._hass.callWS({type:"budget_manager/update_plan_item_order",kind:e,names:a});this._state.settings.plan_item_order=o,this._showMessage("Plan order saved.")}catch(o){this._render(),this._showError(o)}finally{i.forEach(o=>{o.disabled=!1})}}_handlePlanDragKeydown(e){let t=e.currentTarget,a=t.closest("tr[data-plan-kind][data-plan-order-name]");if(!a)return;let i=t.getAttribute("aria-pressed")==="true";if(!i&&(e.key===" "||e.key==="Enter")){e.preventDefault();let c=a.dataset.planKind;this._keyboardPlanDrag={row:a,handle:t,kind:c,originalOrder:this._planRowOrder(c)},this._setPlanDragAppearance(a,t,!0);return}if(!i)return;if(e.key==="Escape"){e.preventDefault(),this._keyboardPlanDrag=null,this._render();return}if(e.key===" "||e.key==="Enter"){e.preventDefault();let c=this._keyboardPlanDrag;this._keyboardPlanDrag=null,this._setPlanDragAppearance(a,t,!1),c&&this._savePlanRowOrder(c.kind,c.originalOrder);return}if(e.key!=="ArrowUp"&&e.key!=="ArrowDown")return;e.preventDefault();let o=this._planRows(a.dataset.planKind),r=o.indexOf(a),s=e.key==="ArrowUp"?r-1:r+1;if(s<0||s>=o.length)return;let l=o[s];e.key==="ArrowUp"?l.parentNode.insertBefore(a,l):l.parentNode.insertBefore(l,a)}_openSettings(){let e=this._state.settings,t=`<fieldset class="settings-group"><legend>Budget cycle</legend><p class="form-help">Each budget month runs through this day of the following calendar month. Shorter months are clamped to their last day.</p>
+      ${this._field("Cycle end day","cycle_end_day",e.cycle_end_day??2,"number","min=1 max=31 step=1 required")}
     </fieldset>
     <fieldset class="settings-group"><legend>Daily-money RAG colors</legend><p class="form-help">These values control only the green, yellow, and red display.</p><div class="two-col">
-      ${this._field("Green from, EUR/day", "daily_green_threshold", settings.daily_green_threshold ?? 45, "number", "min=0 step=0.01 required")}
-      ${this._field("Yellow from, EUR/day", "daily_yellow_threshold", settings.daily_yellow_threshold ?? 40, "number", "min=0 step=0.01 required")}
+      ${this._field("Green from, EUR/day","daily_green_threshold",e.daily_green_threshold??45,"number","min=0 step=0.01 required")}
+      ${this._field("Yellow from, EUR/day","daily_yellow_threshold",e.daily_yellow_threshold??40,"number","min=0 step=0.01 required")}
     </div></fieldset>
     <fieldset class="settings-group"><legend>Automatic savings calculation</legend>
-      <label class="check"><input type="checkbox" name="automatic_savings_enabled" ${settings.automatic_savings_enabled ? "checked" : ""}><span>Calculate and create the monthly Savings transfer automatically</span></label>
+      <label class="check"><input type="checkbox" name="automatic_savings_enabled" ${e.automatic_savings_enabled?"checked":""}><span>Calculate and create the monthly Savings transfer automatically</span></label>
       <p class="form-help">When enabled, every budget month has one system-managed Savings entry. Its value is calculated to leave the target amount per cycle day. An existing Savings entry is reused where possible. Check it after transferring the money from the main account; it then stops affecting daily money. Turn this off before managing savings values manually.</p><div class="two-col">
-      ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
-      ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
+      ${this._field("Target, EUR/day","savings_target_threshold",e.savings_target_threshold??45,"number","min=0 step=0.01 required")}
+      ${this._field("Floor, EUR/day","savings_floor_threshold",e.savings_floor_threshold??40,"number","min=0 step=0.01 required")}
     </div></fieldset>
-    <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="quiet" id="export-json">Export JSON</button><button type="button" class="quiet" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`;
-    const modal = this._openModal("Budget settings", fields, "Save settings", async (form) => {
-      const cycleEndDay = Number(form.get("cycle_end_day"));
-      const green = Number(form.get("daily_green_threshold"));
-      const yellow = Number(form.get("daily_yellow_threshold"));
-      const savingsTarget = Number(form.get("savings_target_threshold"));
-      const savingsFloor = Number(form.get("savings_floor_threshold"));
-      if (yellow > green) throw new Error("Yellow threshold cannot exceed green threshold.");
-      if (savingsFloor > savingsTarget) throw new Error("Savings floor cannot exceed savings target.");
-      if (!Number.isInteger(cycleEndDay) || cycleEndDay < 1 || cycleEndDay > 31) throw new Error("Cycle end day must be a whole number from 1 to 31.");
-      await this._hass.callWS({
-        type: "budget_manager/update_settings",
-        changes: {
-          cycle_end_day: cycleEndDay,
-          daily_green_threshold: green,
-          daily_yellow_threshold: yellow,
-          automatic_savings_enabled: form.has("automatic_savings_enabled"),
-          savings_target_threshold: savingsTarget,
-          savings_floor_threshold: savingsFloor,
-        },
-      });
-    });
-    modal.root.querySelector("#export-json").onclick = () => this._exportData();
-    const fileInput = modal.root.querySelector("#import-file");
-    modal.root.querySelector("#import-json").onclick = () => fileInput.click();
-    fileInput.onchange = async () => {
-      if (fileInput.files?.[0]) await this._importData(fileInput.files[0], modal.close);
-      fileInput.value = "";
-    };
-  }
-
-  async _exportData() {
-    try {
-      const data = await this._hass.callWS({ type: "budget_manager/export_data" });
-      const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      const today = this._currentDateParts();
-      link.download = `budget-manager-${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      this._showMessage("Budget export downloaded.");
-    } catch (err) {
-      this._showError(err);
-    }
-  }
-
-  async _importData(file, closeModal) {
-    try {
-      if (file.size > 10 * 1024 * 1024) throw new Error("Import file cannot exceed 10 MB.");
-      const document = JSON.parse(await file.text());
-      if (!window.confirm("Importing replaces all existing budget months and settings. Continue?")) return;
-      await this._hass.callWS({ type: "budget_manager/import_data", document });
-      closeModal();
-      this._month = null;
-      this._year = this._currentDateParts().year;
-      this._defaultViewApplied = false;
-      this._currentMonthRequested = true;
-      await this._load(this._year);
-      this._showMessage("Budget imported successfully.");
-    } catch (err) {
-      this._showError(err instanceof SyntaxError ? new Error("The selected file is not valid JSON.") : err);
-    }
-  }
-
-  _openModal(title, fields, submitLabel, onSubmit, extraButtons = "") {
-    const root = this.shadowRoot.getElementById("modal-root");
-    root.innerHTML = `<div class="modal-backdrop"><form class="modal" id="modal-form">
-      <div class="modal-head"><h2>${title}</h2><button type="button" class="close" id="modal-close" aria-label="Close" title="Close"></button></div>
-      <div class="modal-body">${fields}</div>
-      <div class="modal-actions">${extraButtons}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="primary" type="submit">${submitLabel}</button></div>
-    </form></div>`;
-    const close = () => { root.innerHTML = ""; };
-    root.querySelector("#modal-close").onclick = close;
-    root.querySelector("#modal-cancel").onclick = close;
-    root.querySelector(".modal-backdrop").onclick = (event) => { if (event.target.classList.contains("modal-backdrop")) close(); };
-    root.querySelector("#modal-form").onsubmit = async (event) => {
-      event.preventDefault();
-      try {
-        await onSubmit(new FormData(event.currentTarget));
-        close();
-        await this._load(this._year);
-      } catch (err) {
-        this._showError(err);
-      }
-    };
-    return { root, close };
-  }
-
-  _field(label, name, value = "", type = "text", attrs = "") {
-    return `<label><span>${label}</span><input name="${name}" type="${type}" value="${this._esc(value)}" ${attrs}></label>`;
-  }
-
-  _openYearPicker() {
-    const options = [...new Set([...(this._state.available_years || []), this._year])].sort();
-    this._openModal("View year", `<label><span>Year</span><select name="year">${options.map((year) => `<option ${year === this._year ? "selected" : ""}>${year}</option>`).join("")}</select></label>`, "Open", async (form) => {
-      this._month = null;
-      await this._load(Number(form.get("year")));
-    });
-  }
-
-  _openCreateMonth(target = `${this._year}-${String(this._currentDateParts().month).padStart(2, "0")}`) {
-    const sources = this._state.available_months || Object.keys(this._state.months).sort();
-    const fields = `${this._field("Target month", "target", target, "month", "required")}
-      <label><span>Copy from</span><select name="source"><option value="">Blank month</option>${sources.map((key) => `<option value="${key}">${this._monthLabel(key)}</option>`).join("")}</select></label>
-      <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite target if it exists</span></label>`;
-    this._openModal("Create month", fields, "Create month", async (form) => {
-      await this._hass.callWS({ type: "budget_manager/create_month", target: form.get("target"), source: form.get("source") || null, overwrite: form.has("overwrite") });
-    });
-  }
-
-  _openCreateYear() {
-    const sourceYears = this._state.available_years || [];
-    const fields = `${this._field("Target year", "target_year", this._year + 1, "number", "min=2000 max=2200 required")}
-      <label><span>Copy from</span><select name="source_year"><option value="">Blank year</option>${sourceYears.map((year) => `<option value="${year}" ${year === this._year ? "selected" : ""}>${year}</option>`).join("")}</select></label>
-      <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite existing target months</span></label>`;
-    this._openModal("Create full year", fields, "Create year", async (form) => {
-      const targetYear = Number(form.get("target_year"));
-      await this._hass.callWS({ type: "budget_manager/create_year", target_year: targetYear, source_year: form.get("source_year") ? Number(form.get("source_year")) : null, overwrite: form.has("overwrite") });
-      this._month = null;
-      this._year = targetYear;
-    });
-  }
-
-  _openBalanceEditor() {
-    const month = this._state.months[this._month];
-    const fields = this._field("Account balance", "account_balance", month.account_balance, "number", "min=0 step=0.01 required");
-    this._openModal("Manual account balance", fields, "Save balance", async (form) => {
-      await this._hass.callWS({ type: "budget_manager/update_month", month: this._month, changes: { account_balance: Number(form.get("account_balance")) } });
-    });
-  }
-
-  _careIncomeOptions(workMonth = this._month) {
-    const options = [];
-    for (const [incomeMonth, month] of Object.entries(this._state.months || {})) {
-      for (const item of month.items || []) {
-        const calculation = item.income_calculation;
-        if (item.kind !== "income" || item.generated_type || !calculation || calculation.working_hours_mode !== "automatic") continue;
-        const calculatedWorkMonth = calculation.working_time_month || this._incomeWorkingMonth(incomeMonth, calculation.work_period || "budget_month");
-        if (calculatedWorkMonth !== workMonth) continue;
-        options.push({ incomeMonth, item });
-      }
-    }
-    return options.sort((left, right) => `${left.incomeMonth}${left.item.name}`.localeCompare(`${right.incomeMonth}${right.item.name}`));
-  }
-
-  _careIncomeOptionValue(incomeMonth, itemId) {
-    return `${incomeMonth}::${itemId}`;
-  }
-
-  _careMonthBounds(monthKey) {
-    const [year, month] = monthKey.split("-").map(Number);
-    const lastDay = new Date(year, month, 0).getDate();
-    return { min: `${monthKey}-01`, max: `${monthKey}-${String(lastDay).padStart(2, "0")}` };
-  }
-
-  _openItemEditor(itemId = null) {
-    const month = this._state.months[this._month];
-    const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
-    if (item?.automatic_savings) return;
-    if (item?.expense_type === "child_care_leave") return this._openCareLeaveEditor(item);
-    if (item?.generated_type === "tervisekassa_care_benefit") return;
-    const incomeCalculation = item?.income_calculation || null;
-    const automaticWorkingHours = (incomeCalculation?.working_hours_mode || "automatic") === "automatic";
-    const fundedPensionRate = Number(incomeCalculation?.funded_pension_rate || 0);
-    const fundedPensionIsJoined = incomeCalculation?.funded_pension_joined ?? (fundedPensionRate > 0);
-    const workPeriod = incomeCalculation?.work_period || "budget_month";
-    const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
-    const careIncomeOptions = this._careIncomeOptions();
-    const unavailableAssignee = item?.assignee_user_id && !this._assignees.some((user) => user.id === item.assignee_user_id)
-      ? `<option value="${this._esc(item.assignee_user_id)}" selected>Unavailable user</option>`
-      : "";
-    const assigneeOptions = this._assignees.map((user) => `<option value="${this._esc(user.id)}" ${item?.assignee_user_id === user.id ? "selected" : ""}>${this._esc(user.name)} · ${user.device_count} ${user.device_count === 1 ? "device" : "devices"}</option>`).join("");
-    const fields = `
-      ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
+    <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="quiet" id="export-json">Export JSON</button><button type="button" class="quiet" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`,a=this._openModal("Budget settings",t,"Save settings",async o=>{let r=Number(o.get("cycle_end_day")),s=Number(o.get("daily_green_threshold")),l=Number(o.get("daily_yellow_threshold")),c=Number(o.get("savings_target_threshold")),u=Number(o.get("savings_floor_threshold"));if(l>s)throw new Error("Yellow threshold cannot exceed green threshold.");if(u>c)throw new Error("Savings floor cannot exceed savings target.");if(!Number.isInteger(r)||r<1||r>31)throw new Error("Cycle end day must be a whole number from 1 to 31.");await this._hass.callWS({type:"budget_manager/update_settings",changes:{cycle_end_day:r,daily_green_threshold:s,daily_yellow_threshold:l,automatic_savings_enabled:o.has("automatic_savings_enabled"),savings_target_threshold:c,savings_floor_threshold:u}})});a.root.querySelector("#export-json").onclick=()=>this._exportData();let i=a.root.querySelector("#import-file");a.root.querySelector("#import-json").onclick=()=>i.click(),i.onchange=async()=>{i.files?.[0]&&await this._importData(i.files[0],a.close),i.value=""}}async _exportData(){try{let e=await this._hass.callWS({type:"budget_manager/export_data"}),t=new Blob([`${JSON.stringify(e,null,2)}
+`],{type:"application/json"}),a=URL.createObjectURL(t),i=document.createElement("a");i.href=a;let o=this._currentDateParts();i.download=`budget-manager-${o.year}-${String(o.month).padStart(2,"0")}-${String(o.day).padStart(2,"0")}.json`,document.body.appendChild(i),i.click(),i.remove(),setTimeout(()=>URL.revokeObjectURL(a),1e3),this._showMessage("Budget export downloaded.")}catch(e){this._showError(e)}}async _importData(e,t){try{if(e.size>10*1024*1024)throw new Error("Import file cannot exceed 10 MB.");let a=JSON.parse(await e.text());if(!window.confirm("Importing replaces all existing budget months and settings. Continue?"))return;await this._hass.callWS({type:"budget_manager/import_data",document:a}),t(),this._month=null,this._year=this._currentDateParts().year,this._defaultViewApplied=!1,this._currentMonthRequested=!0,await this._load(this._year),this._showMessage("Budget imported successfully.")}catch(a){this._showError(a instanceof SyntaxError?new Error("The selected file is not valid JSON."):a)}}_openModal(e,t,a,i,o=""){let r=this.shadowRoot.getElementById("modal-root");r.innerHTML=`<div class="modal-backdrop"><form class="modal" id="modal-form">
+      <div class="modal-head"><h2>${e}</h2><button type="button" class="close" id="modal-close" aria-label="Close" title="Close"></button></div>
+      <div class="modal-body">${t}</div>
+      <div class="modal-actions">${o}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="primary" type="submit">${a}</button></div>
+    </form></div>`;let s=()=>{r.innerHTML=""};return r.querySelector("#modal-close").onclick=s,r.querySelector("#modal-cancel").onclick=s,r.querySelector(".modal-backdrop").onclick=l=>{l.target.classList.contains("modal-backdrop")&&s()},r.querySelector("#modal-form").onsubmit=async l=>{l.preventDefault();try{await i(new FormData(l.currentTarget)),s(),await this._load(this._year)}catch(c){this._showError(c)}},{root:r,close:s}}_field(e,t,a="",i="text",o=""){return`<label><span>${e}</span><input name="${t}" type="${i}" value="${this._esc(a)}" ${o}></label>`}_openYearPicker(){let e=[...new Set([...this._state.available_years||[],this._year])].sort();this._openModal("View year",`<label><span>Year</span><select name="year">${e.map(t=>`<option ${t===this._year?"selected":""}>${t}</option>`).join("")}</select></label>`,"Open",async t=>{this._month=null,await this._load(Number(t.get("year")))})}_openCreateMonth(e=`${this._year}-${String(this._currentDateParts().month).padStart(2,"0")}`){let t=this._state.available_months||Object.keys(this._state.months).sort(),a=`${this._field("Target month","target",e,"month","required")}
+      <label><span>Copy from</span><select name="source"><option value="">Blank month</option>${t.map(i=>`<option value="${i}">${this._monthLabel(i)}</option>`).join("")}</select></label>
+      <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite target if it exists</span></label>`;this._openModal("Create month",a,"Create month",async i=>{await this._hass.callWS({type:"budget_manager/create_month",target:i.get("target"),source:i.get("source")||null,overwrite:i.has("overwrite")})})}_openCreateYear(){let e=this._state.available_years||[],t=`${this._field("Target year","target_year",this._year+1,"number","min=2000 max=2200 required")}
+      <label><span>Copy from</span><select name="source_year"><option value="">Blank year</option>${e.map(a=>`<option value="${a}" ${a===this._year?"selected":""}>${a}</option>`).join("")}</select></label>
+      <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite existing target months</span></label>`;this._openModal("Create full year",t,"Create year",async a=>{let i=Number(a.get("target_year"));await this._hass.callWS({type:"budget_manager/create_year",target_year:i,source_year:a.get("source_year")?Number(a.get("source_year")):null,overwrite:a.has("overwrite")}),this._month=null,this._year=i})}_openBalanceEditor(){let e=this._state.months[this._month],t=this._field("Account balance","account_balance",e.account_balance,"number","min=0 step=0.01 required");this._openModal("Manual account balance",t,"Save balance",async a=>{await this._hass.callWS({type:"budget_manager/update_month",month:this._month,changes:{account_balance:Number(a.get("account_balance"))}})})}_careIncomeOptions(e=this._month){let t=[];for(let[a,i]of Object.entries(this._state.months||{}))for(let o of i.items||[]){let r=o.income_calculation;o.kind!=="income"||o.generated_type||!r||r.working_hours_mode!=="automatic"||(r.working_time_month||this._incomeWorkingMonth(a,r.work_period||"budget_month"))!==e||t.push({incomeMonth:a,item:o})}return t.sort((a,i)=>`${a.incomeMonth}${a.item.name}`.localeCompare(`${i.incomeMonth}${i.item.name}`))}_careIncomeOptionValue(e,t){return`${e}::${t}`}_careMonthBounds(e){let[t,a]=e.split("-").map(Number),i=new Date(t,a,0).getDate();return{min:`${e}-01`,max:`${e}-${String(i).padStart(2,"0")}`}}_openItemEditor(e=null){let t=this._state.months[this._month],a=e?t.items.find(h=>h.id===e):null;if(a?.automatic_savings)return;if(a?.expense_type==="child_care_leave")return this._openCareLeaveEditor(a);if(a?.generated_type==="tervisekassa_care_benefit")return;let i=a?.income_calculation||null,o=(i?.working_hours_mode||"automatic")==="automatic",r=Number(i?.funded_pension_rate||0),s=i?.funded_pension_joined??r>0,l=i?.work_period||"budget_month",c=`${Number(this._month.slice(0,4))+1}-${this._month.slice(5)}-01`,u=this._careIncomeOptions(),m=a?.assignee_user_id&&!this._assignees.some(h=>h.id===a.assignee_user_id)?`<option value="${this._esc(a.assignee_user_id)}" selected>Unavailable user</option>`:"",y=this._assignees.map(h=>`<option value="${this._esc(h.id)}" ${a?.assignee_user_id===h.id?"selected":""}>${this._esc(h.name)} \xB7 ${h.device_count} ${h.device_count===1?"device":"devices"}</option>`).join(""),k=`
+      ${a?.needs_review?'<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>':""}
       <div class="two-col">
-        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option>${!this._state.settings.automatic_savings_enabled || item?.kind === "savings" ? `<option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option>` : ""}<option value="care_leave">Child-care sick leave</option></select></label>
-        ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
+        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!a||a?.kind==="expense"?"selected":""}>Expenditure</option><option value="income" ${a?.kind==="income"?"selected":""}>Expected income</option>${!this._state.settings.automatic_savings_enabled||a?.kind==="savings"?`<option value="savings" ${a?.kind==="savings"?"selected":""}>Savings</option>`:""}<option value="care_leave">Child-care sick leave</option></select></label>
+        ${this._field("Amount","amount",a?.amount??"","number","min=0 step=0.01 required")}
       </div>
-      ${this._field("Name", "name", item?.name ?? "", "text", "required")}
+      ${this._field("Name","name",a?.name??"","text","required")}
       <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
         <legend>Child-care sick leave</legend>
-        ${careIncomeOptions.length ? `<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${careIncomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}">${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>` : `<div class="review-notice"><strong>No eligible income found</strong><span>Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month.</span></div>`}
+        ${u.length?`<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${u.map(({incomeMonth:h,item:T})=>`<option value="${this._careIncomeOptionValue(h,T.id)}">${this._esc(T.name)} \xB7 paid in ${this._monthLabel(h)}</option>`).join("")}</select></label>`:'<div class="review-notice"><strong>No eligible income found</strong><span>Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month.</span></div>'}
         <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="benefit-basis-mode"><option value="estimated_hourly">Estimate from the selected hourly income</option><option value="actual_previous_year_income">Use actual previous-year social-taxable income</option></select></label>
         <label id="actual-income-field" hidden><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value=""></label>
         <p class="form-help" id="care-basis-help"></p>
@@ -1066,464 +165,70 @@ class BudgetManagerPanel extends HTMLElement {
       </fieldset>
       <fieldset class="settings-group income-calculation" id="income-calculation" hidden>
         <legend>Estonian hourly income</legend>
-        <label class="check"><input type="checkbox" name="estonian_hourly" id="estonian-hourly" ${incomeCalculation ? "checked" : ""}><span>Calculate monthly net income from an hourly gross rate</span></label>
+        <label class="check"><input type="checkbox" name="estonian_hourly" id="estonian-hourly" ${i?"checked":""}><span>Calculate monthly net income from an hourly gross rate</span></label>
         <div id="estonian-payroll-fields" hidden>
-          <label><span>Working hours are earned in</span><select name="work_period" id="income-work-period"><option value="budget_month" ${workPeriod === "budget_month" ? "selected" : ""}>The same month as this budget</option><option value="previous_month" ${workPeriod === "previous_month" ? "selected" : ""}>The previous month (salary paid afterward)</option></select></label>
+          <label><span>Working hours are earned in</span><select name="work_period" id="income-work-period"><option value="budget_month" ${l==="budget_month"?"selected":""}>The same month as this budget</option><option value="previous_month" ${l==="previous_month"?"selected":""}>The previous month (salary paid afterward)</option></select></label>
           <div class="two-col">
-            ${this._field("Hourly gross, EUR", "hourly_gross", incomeCalculation?.hourly_gross ?? "", "number", "min=0.01 step=0.01")}
-            ${this._field("Working hours", "working_hours", incomeCalculation?.working_hours ?? "", "number", "min=0.01 step=0.01")}
+            ${this._field("Hourly gross, EUR","hourly_gross",i?.hourly_gross??"","number","min=0.01 step=0.01")}
+            ${this._field("Working hours","working_hours",i?.working_hours??"","number","min=0.01 step=0.01")}
           </div>
-          <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${automaticWorkingHours ? "checked" : ""}><span>Use Estonia's standard monthly working hours automatically</span></label>
-          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(this._month, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
-          <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${incomeCalculation?.apply_social_tax_minimum !== false ? "checked" : ""}><span>Apply the social-tax minimum monthly base (€886)</span></label>
+          <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${o?"checked":""}><span>Use Estonia's standard monthly working hours automatically</span></label>
+          <div class="calendar-source"><span id="working-hours-status">${i?`${this._monthLabel(i.working_time_month||this._incomeWorkingMonth(this._month,l))} \xB7 ${this._esc(i.working_days||0)} working days \xB7 ${this._esc(i.calendar_source||"stored")}`:"Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
+          <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${i?.apply_social_tax_minimum!==!1?"checked":""}><span>Apply the social-tax minimum monthly base (\u20AC886)</span></label>
           <div class="tax-free-setting">
-            <label class="check"><input type="checkbox" name="apply_tax_free_income" ${incomeCalculation?.apply_tax_free_income !== false ? "checked" : ""}><span>Apply tax-free income</span></label>
-            ${this._field("Tax-free income, EUR", "tax_free_income", incomeCalculation?.tax_free_income ?? 700, "number", "min=0 step=0.01")}
+            <label class="check"><input type="checkbox" name="apply_tax_free_income" ${i?.apply_tax_free_income!==!1?"checked":""}><span>Apply tax-free income</span></label>
+            ${this._field("Tax-free income, EUR","tax_free_income",i?.tax_free_income??700,"number","min=0 step=0.01")}
           </div>
-          <label class="check"><input type="checkbox" name="employee_unemployment" ${incomeCalculation?.employee_unemployment !== false ? "checked" : ""}><span>Employee unemployment insurance (1.6%)</span></label>
-          <label class="check"><input type="checkbox" name="employer_unemployment" ${incomeCalculation?.employer_unemployment !== false ? "checked" : ""}><span>Employer unemployment insurance (0.8%)</span></label>
-          <label class="check"><input type="checkbox" name="funded_pension_joined" id="funded-pension-joined" ${fundedPensionIsJoined ? "checked" : ""}><span>Joined the funded pension</span></label>
+          <label class="check"><input type="checkbox" name="employee_unemployment" ${i?.employee_unemployment!==!1?"checked":""}><span>Employee unemployment insurance (1.6%)</span></label>
+          <label class="check"><input type="checkbox" name="employer_unemployment" ${i?.employer_unemployment!==!1?"checked":""}><span>Employer unemployment insurance (0.8%)</span></label>
+          <label class="check"><input type="checkbox" name="funded_pension_joined" id="funded-pension-joined" ${s?"checked":""}><span>Joined the funded pension</span></label>
           <div class="pension-rates" role="radiogroup" aria-label="Funded pension contribution rate">
-            ${[0, 2, 4, 6].map((rate) => `<label><input type="radio" name="funded_pension_rate" value="${rate}" ${rate === fundedPensionRate ? "checked" : ""}><span>${rate}%</span></label>`).join("")}
+            ${[0,2,4,6].map(h=>`<label><input type="radio" name="funded_pension_rate" value="${h}" ${h===r?"checked":""}><span>${h}%</span></label>`).join("")}
           </div>
           <div class="payroll-preview" id="payroll-preview"></div>
           <p class="form-help">Tax calculation uses the latest built-in Estonian rules: 2026 income tax 22%, social tax 33%, and the options above. Future years continue using these known rates until Budget Manager is updated.</p>
         </div>
       </fieldset>
-      <label class="check" id="dynamic-savings"><input type="checkbox" name="dynamic" ${!item || item?.dynamic ? "checked" : ""}><span>Adjust automatically when the daily allowance leaves the acceptable RAG range</span></label>
+      <label class="check" id="dynamic-savings"><input type="checkbox" name="dynamic" ${!a||a?.dynamic?"checked":""}><span>Adjust automatically when the daily allowance leaves the acceptable RAG range</span></label>
       <p class="form-help" id="dynamic-savings-help">The amount is the monthly savings plan. It is preserved inside the automatic savings range from Settings and adjusted outside that range. The transfer is frozen when marked paid.</p>
       <div class="two-col">
-        ${this._field("Due day", "due_day", item?.due_day ?? "", "number", "min=1 max=31")}
-        ${this._field("Category", "category", item?.category ?? "")}
+        ${this._field("Due day","due_day",a?.due_day??"","number","min=1 max=31")}
+        ${this._field("Category","category",a?.category??"")}
       </div>
       <fieldset class="settings-group" id="assignment-settings">
         <legend>Assignment and reminders</legend>
         <div class="two-col">
-          <label><span>Assignee</span><select name="assignee_user_id" id="item-assignee"><option value="">Unassigned</option>${unavailableAssignee}${assigneeOptions}</select></label>
-          ${this._field("First reminder", "reminder_time", item?.reminder_time || "09:00", "time", "step=60")}
+          <label><span>Assignee</span><select name="assignee_user_id" id="item-assignee"><option value="">Unassigned</option>${m}${y}</select></label>
+          ${this._field("First reminder","reminder_time",a?.reminder_time||"09:00","time","step=60")}
         </div>
         <p class="form-help">Only Home Assistant users with an active Mobile App notification device are listed. A notification is repeated hourly until the item is completed or the due day ends.</p>
       </fieldset>
       <div class="two-col">
-        <label><span>Recurrence</span><select name="recurrence" id="recurrence"><option value="single" ${!item || item.recurrence === "single" ? "selected" : ""}>One-time</option><option value="monthly" ${item?.recurrence === "monthly" ? "selected" : ""}>Every month</option><option value="yearly" ${item?.recurrence === "yearly" ? "selected" : ""}>Every year</option></select></label>
-        ${this._field("Recurrence end", "recurrence_end", item?.recurrence_end || endDefault, "date", "")}
+        <label><span>Recurrence</span><select name="recurrence" id="recurrence"><option value="single" ${!a||a.recurrence==="single"?"selected":""}>One-time</option><option value="monthly" ${a?.recurrence==="monthly"?"selected":""}>Every month</option><option value="yearly" ${a?.recurrence==="yearly"?"selected":""}>Every year</option></select></label>
+        ${this._field("Recurrence end","recurrence_end",a?.recurrence_end||c,"date","")}
       </div>
-      ${item?.series_id ? `<label><span>Edit scope</span><select name="scope"><option value="this">Only ${this._monthLabel(this._month)}</option><option value="future">This and future unpaid occurrences</option></select></label>` : ""}
-      <label class="check"><input type="checkbox" name="special" ${item?.special ? "checked" : ""}><span>Highlight as renewal / special month</span></label>
-      ${this._field("Special label", "special_label", item?.special_label || "Renewal")}
-      <label><span>Notes</span><textarea name="notes" rows="3">${this._esc(item?.notes || "")}</textarea></label>`;
-    const extra = item ? `<button type="button" class="danger-button" id="delete-item">Delete</button>` : "";
-    const modal = this._openModal(item ? "Edit item" : "Add item", fields, item ? "Save" : "Add", async (form) => {
-      const recurrence = form.get("recurrence");
-      const selectedKind = form.get("kind");
-      const isCareLeave = selectedKind === "care_leave";
-      const kind = isCareLeave ? "expense" : selectedKind;
-      const useEstonianHourly = kind === "income" && form.has("estonian_hourly");
-      const hourlyGross = Number(form.get("hourly_gross"));
-      const workingHours = Number(form.get("working_hours"));
-      if (useEstonianHourly && (!Number.isFinite(hourlyGross) || hourlyGross <= 0)) throw new Error("Hourly gross must be greater than zero.");
-      if (useEstonianHourly && (!Number.isFinite(workingHours) || workingHours <= 0)) throw new Error("Working hours must be greater than zero.");
-      const careLink = String(form.get("care_income_link") || "").split("::");
-      if (isCareLeave && careLink.length !== 2) throw new Error("Create an automatic Estonian hourly income for this work month before adding care leave.");
-      const linkedIncome = isCareLeave ? this._state.months[careLink[0]]?.items.find((entry) => entry.id === careLink[1]) : null;
-      const basisMode = String(form.get("benefit_basis_mode") || "estimated_hourly");
-      const actualPreviousYearIncome = Number(form.get("actual_previous_year_income") || 0);
-      const assigneeUserId = isCareLeave ? "" : String(form.get("assignee_user_id") || "");
-      const dueDay = isCareLeave ? null : (form.get("due_day") ? Number(form.get("due_day")) : null);
-      if (assigneeUserId && !dueDay) throw new Error("Choose a due day for assigned reminders.");
-      if (isCareLeave && basisMode === "actual_previous_year_income" && (!Number.isFinite(actualPreviousYearIncome) || actualPreviousYearIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
-      await this._hass.callWS({
-        type: "budget_manager/upsert_item",
-        month: this._month,
-        scope: form.get("scope") || "this",
-        item: {
-          ...(item || {}),
-          name: form.get("name"), kind, amount: isCareLeave ? 0 : Number(form.get("amount")),
-          due_day: dueDay,
-          assignee_user_id: assigneeUserId || null,
-          reminder_time: assigneeUserId ? String(form.get("reminder_time") || "09:00") : null,
-          category: isCareLeave ? "Care leave" : form.get("category"), recurrence: isCareLeave ? "single" : recurrence,
-          recurrence_end: isCareLeave || recurrence === "single" ? null : form.get("recurrence_end"),
-          expense_type: isCareLeave ? "child_care_leave" : "standard",
-          care_leave: isCareLeave ? {
-            linked_income_item_id: careLink[1],
-            linked_income_series_id: linkedIncome?.series_id || "",
-            linked_income_name: linkedIncome?.name || "",
-            work_month: this._month,
-            income_month: careLink[0],
-            periods: [],
-            benefit_basis_mode: basisMode,
-            actual_previous_year_income: basisMode === "actual_previous_year_income" ? actualPreviousYearIncome : 0,
-          } : null,
-          income_calculation: useEstonianHourly ? {
-            mode: "estonian_hourly",
-            hourly_gross: hourlyGross,
-            working_hours_mode: form.has("automatic_working_hours") ? "automatic" : "manual",
-            work_period: form.get("work_period"),
-            working_hours: workingHours,
-            working_days: Number(modal.root.querySelector("#working-hours-status").dataset.workingDays || 0),
-            working_time_month: modal.root.querySelector("#working-hours-status").dataset.workingTimeMonth || this._incomeWorkingMonth(this._month, form.get("work_period")),
-            calendar_source: modal.root.querySelector("#working-hours-status").dataset.calendarSource || (form.has("automatic_working_hours") ? "pending" : "manual"),
-            apply_social_tax_minimum: form.has("apply_social_tax_minimum"),
-            apply_tax_free_income: form.has("apply_tax_free_income"),
-            tax_free_income: Number(form.get("tax_free_income")),
-            employee_unemployment: form.has("employee_unemployment"),
-            employer_unemployment: form.has("employer_unemployment"),
-            funded_pension_joined: form.has("funded_pension_joined"),
-            funded_pension_rate: form.has("funded_pension_joined") ? Number(form.get("funded_pension_rate")) : 0,
-          } : null,
-          dynamic: !isCareLeave && form.has("dynamic"),
-          needs_review: false,
-          special: !isCareLeave && form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
-        },
-      });
-    }, extra);
-    const recurrenceSelect = modal.root.querySelector("#recurrence");
-    const endInput = modal.root.querySelector('[name="recurrence_end"]');
-    const updateEnd = () => { endInput.disabled = recurrenceSelect.value === "single"; endInput.required = recurrenceSelect.value !== "single"; };
-    recurrenceSelect.onchange = updateEnd;
-    updateEnd();
-    const kindSelect = modal.root.querySelector("#item-kind");
-    const dynamicSavings = modal.root.querySelector("#dynamic-savings");
-    const dynamicSavingsHelp = modal.root.querySelector("#dynamic-savings-help");
-    const amountInput = modal.root.querySelector('[name="amount"]');
-    const amountLabel = amountInput.closest("label").querySelector("span");
-    const nameInput = modal.root.querySelector('[name="name"]');
-    const careLeaveSection = modal.root.querySelector("#care-leave-settings");
-    const careIncomeLink = modal.root.querySelector("#care-income-link");
-    const benefitBasisMode = modal.root.querySelector("#benefit-basis-mode");
-    const actualIncomeField = modal.root.querySelector("#actual-income-field");
-    const actualIncomeInput = modal.root.querySelector('[name="actual_previous_year_income"]');
-    const careBasisHelp = modal.root.querySelector("#care-basis-help");
-    const incomeSection = modal.root.querySelector("#income-calculation");
-    const estonianHourly = modal.root.querySelector("#estonian-hourly");
-    const payrollFields = modal.root.querySelector("#estonian-payroll-fields");
-    const automaticHours = modal.root.querySelector("#automatic-working-hours");
-    const workPeriodSelect = modal.root.querySelector("#income-work-period");
-    const hourlyGrossInput = modal.root.querySelector('[name="hourly_gross"]');
-    const workingHoursInput = modal.root.querySelector('[name="working_hours"]');
-    const workingHoursStatus = modal.root.querySelector("#working-hours-status");
-    const refreshWorkingHours = modal.root.querySelector("#refresh-working-hours");
-    const fundedPensionJoined = modal.root.querySelector("#funded-pension-joined");
-    const payrollPreview = modal.root.querySelector("#payroll-preview");
-    const assignmentSettings = modal.root.querySelector("#assignment-settings");
-    const assigneeSelect = modal.root.querySelector("#item-assignee");
-    const reminderTimeInput = modal.root.querySelector('[name="reminder_time"]');
-    const dueDayInput = modal.root.querySelector('[name="due_day"]');
-    const updateAssignment = () => {
-      const enabled = kindSelect.value !== "care_leave" && Boolean(assigneeSelect.value);
-      reminderTimeInput.disabled = !enabled;
-      reminderTimeInput.required = enabled;
-      dueDayInput.required = enabled;
-    };
-    assigneeSelect.onchange = updateAssignment;
-    workingHoursStatus.dataset.workingDays = String(incomeCalculation?.working_days || 0);
-    workingHoursStatus.dataset.calendarSource = incomeCalculation?.calendar_source || (automaticWorkingHours ? "pending" : "manual");
-    workingHoursStatus.dataset.workingTimeMonth = incomeCalculation?.working_time_month || this._incomeWorkingMonth(this._month, workPeriod);
-    const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
-    const updatePayrollPreview = () => {
-      if (kindSelect.value !== "income" || !estonianHourly.checked) return;
-      const hourlyGross = Number(hourlyGrossInput.value);
-      const workingHours = Number(workingHoursInput.value);
-      if (!Number.isFinite(hourlyGross) || hourlyGross <= 0 || !Number.isFinite(workingHours) || workingHours <= 0) {
-        payrollPreview.innerHTML = `<span>Enter an hourly gross rate and working hours to calculate net income.</span>`;
-        return;
-      }
-      const gross = roundMoney(hourlyGross * workingHours);
-      const employeeUnemployment = modal.root.querySelector('[name="employee_unemployment"]').checked ? roundMoney(gross * 0.016) : 0;
-      const pensionRate = fundedPensionJoined.checked ? Number(modal.root.querySelector('[name="funded_pension_rate"]:checked')?.value || 0) : 0;
-      const pension = roundMoney(gross * pensionRate / 100);
-      const applyTaxFree = modal.root.querySelector('[name="apply_tax_free_income"]').checked;
-      const taxFree = applyTaxFree ? Math.min(gross, Number(modal.root.querySelector('[name="tax_free_income"]').value || 0)) : 0;
-      const taxable = Math.max(0, gross - employeeUnemployment - pension - taxFree);
-      const incomeTax = roundMoney(taxable * 0.22);
-      const net = roundMoney(gross - employeeUnemployment - pension - incomeTax);
-      const socialBase = modal.root.querySelector('[name="apply_social_tax_minimum"]').checked ? Math.max(gross, 886) : gross;
-      const socialTax = roundMoney(socialBase * 0.33);
-      const employerUnemployment = modal.root.querySelector('[name="employer_unemployment"]').checked ? roundMoney(gross * 0.008) : 0;
-      const employerCost = roundMoney(gross + socialTax + employerUnemployment);
-      amountInput.value = net.toFixed(2);
-      payrollPreview.innerHTML = `<div><span>Gross</span><strong>${this._money(gross)}</strong></div><div><span>Net income</span><strong>${this._money(net)}</strong></div><div><span>Income tax</span><strong>${this._money(incomeTax)}</strong></div><div><span>Employer cost</span><strong>${this._money(employerCost)}</strong></div>`;
-    };
-    const updatePayrollControls = () => {
-      const enabled = kindSelect.value === "income" && estonianHourly.checked;
-      payrollFields.hidden = !enabled;
-      amountInput.readOnly = enabled || kindSelect.value === "care_leave";
-      workingHoursInput.readOnly = enabled && automaticHours.checked;
-      refreshWorkingHours.hidden = !enabled || !automaticHours.checked;
-      fundedPensionJoined.closest("label").classList.toggle("muted", !fundedPensionJoined.checked);
-      modal.root.querySelectorAll('[name="funded_pension_rate"]').forEach((radio) => { radio.disabled = !fundedPensionJoined.checked; });
-      updatePayrollPreview();
-    };
-    const loadWorkingHours = async () => {
-      if (kindSelect.value !== "income" || !estonianHourly.checked || !automaticHours.checked) return;
-      refreshWorkingHours.disabled = true;
-      workingHoursStatus.textContent = "Loading Estonia working hours…";
-      try {
-        const workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
-        const result = await this._hass.callWS({ type: "budget_manager/estonian_working_hours", month: workingTimeMonth });
-        workingHoursInput.value = Number(result.working_hours).toFixed(2);
-        workingHoursStatus.dataset.workingDays = String(result.working_days);
-        workingHoursStatus.dataset.calendarSource = result.calendar_source;
-        workingHoursStatus.dataset.workingTimeMonth = workingTimeMonth;
-        const source = result.calendar_source === "nager_date" ? "Nager.Date" : "statutory offline fallback";
-        workingHoursStatus.textContent = `${this._monthLabel(workingTimeMonth)} · ${result.working_days} working days · ${result.working_hours} hours · ${source}`;
-        updatePayrollPreview();
-      } catch (err) {
-        workingHoursStatus.textContent = "Working hours could not be refreshed; the server will use its statutory fallback when saving.";
-        this._showError(err);
-      } finally {
-        refreshWorkingHours.disabled = false;
-      }
-    };
-    const updateKind = () => {
-      const savingsVisible = kindSelect.value === "savings";
-      const careVisible = kindSelect.value === "care_leave";
-      dynamicSavings.hidden = !savingsVisible;
-      dynamicSavingsHelp.hidden = !savingsVisible;
-      incomeSection.hidden = kindSelect.value !== "income";
-      careLeaveSection.hidden = !careVisible;
-      assignmentSettings.hidden = careVisible;
-      assignmentSettings.querySelectorAll("input,select").forEach((control) => { control.disabled = careVisible; });
-      careLeaveSection.querySelectorAll("input,select").forEach((control) => { control.disabled = !careVisible; });
-      if (careIncomeLink) careIncomeLink.required = careVisible;
-      recurrenceSelect.closest(".two-col").hidden = careVisible;
-      modal.root.querySelector('[name="due_day"]').closest(".two-col").hidden = careVisible;
-      modal.root.querySelector('[name="special"]').closest("label").hidden = careVisible;
-      modal.root.querySelector('[name="special_label"]').closest("label").hidden = careVisible;
-      if (careVisible) {
-        recurrenceSelect.value = "single";
-        if (amountInput.dataset.careDisabled !== "true") amountInput.dataset.previousValue = amountInput.value;
-        amountInput.dataset.careDisabled = "true";
-        amountInput.value = "";
-        amountInput.placeholder = "Not applicable";
-        amountInput.disabled = true;
-        amountLabel.textContent = "Amount · not applicable";
-        if (!nameInput.value.trim()) nameInput.value = "Child-care sick leave";
-      } else if (amountInput.dataset.careDisabled === "true") {
-        amountInput.value = amountInput.dataset.previousValue || "";
-        amountInput.placeholder = "";
-        amountInput.disabled = false;
-        amountInput.dataset.careDisabled = "false";
-        amountLabel.textContent = "Amount";
-      }
-      if (savingsVisible && amountInput.value === "") amountInput.value = "0";
-      updateEnd();
-      updatePayrollControls();
-      updateCareBasis();
-      updateAssignment();
-    };
-    const updateCareBasis = () => {
-      const actual = benefitBasisMode.value === "actual_previous_year_income";
-      actualIncomeField.hidden = !actual;
-      actualIncomeInput.disabled = kindSelect.value !== "care_leave" || !actual;
-      actualIncomeInput.required = kindSelect.value === "care_leave" && actual;
-      careBasisHelp.textContent = actual
-        ? "Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides this annual amount by 365; the result is still shown as an approximation."
-        : "Budget Manager approximates the previous calendar year's income from the selected hourly gross rate and Estonia's standard working hours. This is useful for planning but can differ from Tervisekassa's actual source data.";
-    };
-    kindSelect.onchange = updateKind;
-    benefitBasisMode.onchange = updateCareBasis;
-    estonianHourly.onchange = () => {
-      updatePayrollControls();
-      if (estonianHourly.checked && automaticHours.checked && !workingHoursInput.value) loadWorkingHours();
-    };
-    automaticHours.onchange = () => {
-      workingHoursStatus.dataset.calendarSource = automaticHours.checked ? "pending" : "manual";
-      updatePayrollControls();
-      if (automaticHours.checked) loadWorkingHours();
-      else workingHoursStatus.textContent = "Manual working hours";
-    };
-    workPeriodSelect.onchange = () => {
-      workingHoursStatus.dataset.workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
-      if (automaticHours.checked) loadWorkingHours();
-      else workingHoursStatus.textContent = `${this._monthLabel(workingHoursStatus.dataset.workingTimeMonth)} · manual working hours`;
-    };
-    fundedPensionJoined.onchange = () => {
-      const selected = modal.root.querySelector('[name="funded_pension_rate"]:checked');
-      if (fundedPensionJoined.checked && Number(selected?.value || 0) === 0) {
-        modal.root.querySelector('[name="funded_pension_rate"][value="2"]').checked = true;
-      } else if (!fundedPensionJoined.checked) {
-        modal.root.querySelector('[name="funded_pension_rate"][value="0"]').checked = true;
-      }
-      updatePayrollControls();
-    };
-    refreshWorkingHours.onclick = loadWorkingHours;
-    payrollFields.querySelectorAll("input").forEach((input) => {
-      input.addEventListener("input", updatePayrollPreview);
-      input.addEventListener("change", updatePayrollControls);
-    });
-    updateKind();
-    if (item) modal.root.querySelector("#delete-item").onclick = async () => {
-      const scope = item.series_id && window.confirm("Delete this and all future unpaid occurrences?\n\nOK = future series, Cancel = only this occurrence") ? "future" : "this";
-      try {
-        await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope });
-        modal.close();
-        await this._load(this._year);
-      } catch (err) { this._showError(err); }
-    };
-  }
+      ${a?.series_id?`<label><span>Edit scope</span><select name="scope"><option value="this">Only ${this._monthLabel(this._month)}</option><option value="future">This and future unpaid occurrences</option></select></label>`:""}
+      <label class="check"><input type="checkbox" name="special" ${a?.special?"checked":""}><span>Highlight as renewal / special month</span></label>
+      ${this._field("Special label","special_label",a?.special_label||"Renewal")}
+      <label><span>Notes</span><textarea name="notes" rows="3">${this._esc(a?.notes||"")}</textarea></label>`,w=a?'<button type="button" class="danger-button" id="delete-item">Delete</button>':"",d=this._openModal(a?"Edit item":"Add item",k,a?"Save":"Add",async h=>{let T=h.get("recurrence"),F=h.get("kind"),L=F==="care_leave",Xe=L?"expense":F,xe=Xe==="income"&&h.has("estonian_hourly"),Ve=Number(h.get("hourly_gross")),Ae=Number(h.get("working_hours"));if(xe&&(!Number.isFinite(Ve)||Ve<=0))throw new Error("Hourly gross must be greater than zero.");if(xe&&(!Number.isFinite(Ae)||Ae<=0))throw new Error("Working hours must be greater than zero.");let be=String(h.get("care_income_link")||"").split("::");if(L&&be.length!==2)throw new Error("Create an automatic Estonian hourly income for this work month before adding care leave.");let Oe=L?this._state.months[be[0]]?.items.find(pt=>pt.id===be[1]):null,ke=String(h.get("benefit_basis_mode")||"estimated_hourly"),Ie=Number(h.get("actual_previous_year_income")||0),Pe=L?"":String(h.get("assignee_user_id")||""),Ke=L?null:h.get("due_day")?Number(h.get("due_day")):null;if(Pe&&!Ke)throw new Error("Choose a due day for assigned reminders.");if(L&&ke==="actual_previous_year_income"&&(!Number.isFinite(Ie)||Ie<=0))throw new Error("Enter the previous calendar year's total social-taxable income.");await this._hass.callWS({type:"budget_manager/upsert_item",month:this._month,scope:h.get("scope")||"this",item:{...a||{},name:h.get("name"),kind:Xe,amount:L?0:Number(h.get("amount")),due_day:Ke,assignee_user_id:Pe||null,reminder_time:Pe?String(h.get("reminder_time")||"09:00"):null,category:L?"Care leave":h.get("category"),recurrence:L?"single":T,recurrence_end:L||T==="single"?null:h.get("recurrence_end"),expense_type:L?"child_care_leave":"standard",care_leave:L?{linked_income_item_id:be[1],linked_income_series_id:Oe?.series_id||"",linked_income_name:Oe?.name||"",work_month:this._month,income_month:be[0],periods:[],benefit_basis_mode:ke,actual_previous_year_income:ke==="actual_previous_year_income"?Ie:0}:null,income_calculation:xe?{mode:"estonian_hourly",hourly_gross:Ve,working_hours_mode:h.has("automatic_working_hours")?"automatic":"manual",work_period:h.get("work_period"),working_hours:Ae,working_days:Number(d.root.querySelector("#working-hours-status").dataset.workingDays||0),working_time_month:d.root.querySelector("#working-hours-status").dataset.workingTimeMonth||this._incomeWorkingMonth(this._month,h.get("work_period")),calendar_source:d.root.querySelector("#working-hours-status").dataset.calendarSource||(h.has("automatic_working_hours")?"pending":"manual"),apply_social_tax_minimum:h.has("apply_social_tax_minimum"),apply_tax_free_income:h.has("apply_tax_free_income"),tax_free_income:Number(h.get("tax_free_income")),employee_unemployment:h.has("employee_unemployment"),employer_unemployment:h.has("employer_unemployment"),funded_pension_joined:h.has("funded_pension_joined"),funded_pension_rate:h.has("funded_pension_joined")?Number(h.get("funded_pension_rate")):0}:null,dynamic:!L&&h.has("dynamic"),needs_review:!1,special:!L&&h.has("special"),special_label:h.get("special_label"),notes:h.get("notes")}})},w),S=d.root.querySelector("#recurrence"),C=d.root.querySelector('[name="recurrence_end"]'),v=()=>{C.disabled=S.value==="single",C.required=S.value!=="single"};S.onchange=v,v();let E=d.root.querySelector("#item-kind"),M=d.root.querySelector("#dynamic-savings"),f=d.root.querySelector("#dynamic-savings-help"),g=d.root.querySelector('[name="amount"]'),q=g.closest("label").querySelector("span"),K=d.root.querySelector('[name="name"]'),I=d.root.querySelector("#care-leave-settings"),ae=d.root.querySelector("#care-income-link"),Q=d.root.querySelector("#benefit-basis-mode"),pe=d.root.querySelector("#actual-income-field"),Z=d.root.querySelector('[name="actual_previous_year_income"]'),oe=d.root.querySelector("#care-basis-help"),me=d.root.querySelector("#income-calculation"),Y=d.root.querySelector("#estonian-hourly"),ge=d.root.querySelector("#estonian-payroll-fields"),H=d.root.querySelector("#automatic-working-hours"),Me=d.root.querySelector("#income-work-period"),At=d.root.querySelector('[name="hourly_gross"]'),fe=d.root.querySelector('[name="working_hours"]'),j=d.root.querySelector("#working-hours-status"),Ue=d.root.querySelector("#refresh-working-hours"),_e=d.root.querySelector("#funded-pension-joined"),Ot=d.root.querySelector("#payroll-preview"),It=d.root.querySelector("#assignment-settings"),Pt=d.root.querySelector("#item-assignee"),Rt=d.root.querySelector('[name="reminder_time"]'),ua=d.root.querySelector('[name="due_day"]'),qt=()=>{let h=E.value!=="care_leave"&&!!Pt.value;Rt.disabled=!h,Rt.required=h,ua.required=h};Pt.onchange=qt,j.dataset.workingDays=String(i?.working_days||0),j.dataset.calendarSource=i?.calendar_source||(o?"pending":"manual"),j.dataset.workingTimeMonth=i?.working_time_month||this._incomeWorkingMonth(this._month,l);let ce=h=>Math.round((Number(h)+Number.EPSILON)*100)/100,ht=()=>{if(E.value!=="income"||!Y.checked)return;let h=Number(At.value),T=Number(fe.value);if(!Number.isFinite(h)||h<=0||!Number.isFinite(T)||T<=0){Ot.innerHTML="<span>Enter an hourly gross rate and working hours to calculate net income.</span>";return}let F=ce(h*T),L=d.root.querySelector('[name="employee_unemployment"]').checked?ce(F*.016):0,Xe=_e.checked?Number(d.root.querySelector('[name="funded_pension_rate"]:checked')?.value||0):0,xe=ce(F*Xe/100),Ae=d.root.querySelector('[name="apply_tax_free_income"]').checked?Math.min(F,Number(d.root.querySelector('[name="tax_free_income"]').value||0)):0,be=Math.max(0,F-L-xe-Ae),Oe=ce(be*.22),ke=ce(F-L-xe-Oe),Ie=d.root.querySelector('[name="apply_social_tax_minimum"]').checked?Math.max(F,886):F,Pe=ce(Ie*.33),Ke=d.root.querySelector('[name="employer_unemployment"]').checked?ce(F*.008):0,pt=ce(F+Pe+Ke);g.value=ke.toFixed(2),Ot.innerHTML=`<div><span>Gross</span><strong>${this._money(F)}</strong></div><div><span>Net income</span><strong>${this._money(ke)}</strong></div><div><span>Income tax</span><strong>${this._money(Oe)}</strong></div><div><span>Employer cost</span><strong>${this._money(pt)}</strong></div>`},Ne=()=>{let h=E.value==="income"&&Y.checked;ge.hidden=!h,g.readOnly=h||E.value==="care_leave",fe.readOnly=h&&H.checked,Ue.hidden=!h||!H.checked,_e.closest("label").classList.toggle("muted",!_e.checked),d.root.querySelectorAll('[name="funded_pension_rate"]').forEach(T=>{T.disabled=!_e.checked}),ht()},Ge=async()=>{if(!(E.value!=="income"||!Y.checked||!H.checked)){Ue.disabled=!0,j.textContent="Loading Estonia working hours\u2026";try{let h=this._incomeWorkingMonth(this._month,Me.value),T=await this._hass.callWS({type:"budget_manager/estonian_working_hours",month:h});fe.value=Number(T.working_hours).toFixed(2),j.dataset.workingDays=String(T.working_days),j.dataset.calendarSource=T.calendar_source,j.dataset.workingTimeMonth=h;let F=T.calendar_source==="nager_date"?"Nager.Date":"statutory offline fallback";j.textContent=`${this._monthLabel(h)} \xB7 ${T.working_days} working days \xB7 ${T.working_hours} hours \xB7 ${F}`,ht()}catch(h){j.textContent="Working hours could not be refreshed; the server will use its statutory fallback when saving.",this._showError(h)}finally{Ue.disabled=!1}}},Ft=()=>{let h=E.value==="savings",T=E.value==="care_leave";M.hidden=!h,f.hidden=!h,me.hidden=E.value!=="income",I.hidden=!T,It.hidden=T,It.querySelectorAll("input,select").forEach(F=>{F.disabled=T}),I.querySelectorAll("input,select").forEach(F=>{F.disabled=!T}),ae&&(ae.required=T),S.closest(".two-col").hidden=T,d.root.querySelector('[name="due_day"]').closest(".two-col").hidden=T,d.root.querySelector('[name="special"]').closest("label").hidden=T,d.root.querySelector('[name="special_label"]').closest("label").hidden=T,T?(S.value="single",g.dataset.careDisabled!=="true"&&(g.dataset.previousValue=g.value),g.dataset.careDisabled="true",g.value="",g.placeholder="Not applicable",g.disabled=!0,q.textContent="Amount \xB7 not applicable",K.value.trim()||(K.value="Child-care sick leave")):g.dataset.careDisabled==="true"&&(g.value=g.dataset.previousValue||"",g.placeholder="",g.disabled=!1,g.dataset.careDisabled="false",q.textContent="Amount"),h&&g.value===""&&(g.value="0"),v(),Ne(),Lt(),qt()},Lt=()=>{let h=Q.value==="actual_previous_year_income";pe.hidden=!h,Z.disabled=E.value!=="care_leave"||!h,Z.required=E.value==="care_leave"&&h,oe.textContent=h?"Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides this annual amount by 365; the result is still shown as an approximation.":"Budget Manager approximates the previous calendar year's income from the selected hourly gross rate and Estonia's standard working hours. This is useful for planning but can differ from Tervisekassa's actual source data."};E.onchange=Ft,Q.onchange=Lt,Y.onchange=()=>{Ne(),Y.checked&&H.checked&&!fe.value&&Ge()},H.onchange=()=>{j.dataset.calendarSource=H.checked?"pending":"manual",Ne(),H.checked?Ge():j.textContent="Manual working hours"},Me.onchange=()=>{j.dataset.workingTimeMonth=this._incomeWorkingMonth(this._month,Me.value),H.checked?Ge():j.textContent=`${this._monthLabel(j.dataset.workingTimeMonth)} \xB7 manual working hours`},_e.onchange=()=>{let h=d.root.querySelector('[name="funded_pension_rate"]:checked');_e.checked&&Number(h?.value||0)===0?d.root.querySelector('[name="funded_pension_rate"][value="2"]').checked=!0:_e.checked||(d.root.querySelector('[name="funded_pension_rate"][value="0"]').checked=!0),Ne()},Ue.onclick=Ge,ge.querySelectorAll("input").forEach(h=>{h.addEventListener("input",ht),h.addEventListener("change",Ne)}),Ft(),a&&(d.root.querySelector("#delete-item").onclick=async()=>{let h=a.series_id&&window.confirm(`Delete this and all future unpaid occurrences?
 
-  _openCareLeaveEditor(item) {
-    const care = item.care_leave || {};
-    const incomeOptions = this._careIncomeOptions(care.work_month || this._month);
-    const selectedLink = this._careIncomeOptionValue(care.income_month, care.linked_income_item_id);
-    const bounds = this._careMonthBounds(care.work_month || this._month);
-    const periods = care.periods || [];
-    const basisMode = care.benefit_basis_mode || "estimated_hourly";
-    const periodRows = periods.length ? periods.map((period) => {
-      const calculation = period.calculation || {};
-      const dateLabel = this._formatDateRange(period.start, period.end);
-      return `<article class="care-period" data-period-id="${period.id}">
-        <div><strong>${this._esc(dateLabel)}</strong><span>${this._esc(calculation.calendar_days || 0)} calendar days · ${this._esc(calculation.missed_working_hours || 0)} missed work hours</span><span>Estimated Tervisekassa net benefit ${this._money(calculation.estimated_net_benefit || 0)}</span></div>
-        <div class="care-period-actions"><button type="button" class="quiet edit-care-period" data-period-id="${period.id}">Edit</button><button type="button" class="danger-button delete-care-period" data-period-id="${period.id}">Remove</button></div>
-      </article>`;
-    }).join("") : `<div class="empty-row">No care-leave periods recorded yet.</div>`;
-    const fields = `
+OK = future series, Cancel = only this occurrence`)?"future":"this";try{await this._hass.callWS({type:"budget_manager/delete_item",month:this._month,item_id:a.id,scope:h}),d.close(),await this._load(this._year)}catch(T){this._showError(T)}})}_openCareLeaveEditor(e){let t=e.care_leave||{},a=this._careIncomeOptions(t.work_month||this._month),i=this._careIncomeOptionValue(t.income_month,t.linked_income_item_id),o=this._careMonthBounds(t.work_month||this._month),r=t.periods||[],s=t.benefit_basis_mode||"estimated_hourly",l=r.length?r.map(f=>{let g=f.calculation||{},q=this._formatDateRange(f.start,f.end);return`<article class="care-period" data-period-id="${f.id}">
+        <div><strong>${this._esc(q)}</strong><span>${this._esc(g.calendar_days||0)} calendar days \xB7 ${this._esc(g.missed_working_hours||0)} missed work hours</span><span>Estimated Tervisekassa net benefit ${this._money(g.estimated_net_benefit||0)}</span></div>
+        <div class="care-period-actions"><button type="button" class="quiet edit-care-period" data-period-id="${f.id}">Edit</button><button type="button" class="danger-button delete-care-period" data-period-id="${f.id}">Remove</button></div>
+      </article>`}).join(""):'<div class="empty-row">No care-leave periods recorded yet.</div>',c=`
       <div class="review-notice care-estimate-notice" role="note"><strong>Planning approximation</strong><span>Budget Manager estimates the salary reduction and Tervisekassa payment. The final payment can differ because Tervisekassa uses official income and eligibility data.</span></div>
-      ${this._field("Name", "name", item.name, "text", "required")}
-      <label><span>Salary affected by this leave</span><select name="care_income_link" required>${incomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}" ${this._careIncomeOptionValue(incomeMonth, income.id) === selectedLink ? "selected" : ""}>${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>
-      <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${basisMode === "estimated_hourly" ? "selected" : ""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${basisMode === "actual_previous_year_income" ? "selected" : ""}>Use actual previous-year social-taxable income</option></select></label>
-      <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(care.actual_previous_year_income || "")}"></label>
+      ${this._field("Name","name",e.name,"text","required")}
+      <label><span>Salary affected by this leave</span><select name="care_income_link" required>${a.map(({incomeMonth:f,item:g})=>`<option value="${this._careIncomeOptionValue(f,g.id)}" ${this._careIncomeOptionValue(f,g.id)===i?"selected":""}>${this._esc(g.name)} \xB7 paid in ${this._monthLabel(f)}</option>`).join("")}</select></label>
+      <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${s==="estimated_hourly"?"selected":""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${s==="actual_previous_year_income"?"selected":""}>Use actual previous-year social-taxable income</option></select></label>
+      <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(t.actual_previous_year_income||"")}"></label>
       <p class="form-help" id="care-editor-basis-help"></p>
-      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">＋ Add period</button></div><div class="care-period-list">${periodRows}</div></section>
+      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${r.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(t.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">\uFF0B Add period</button></div><div class="care-period-list">${l}</div></section>
       <fieldset class="settings-group" id="care-period-form" hidden>
         <legend id="care-period-form-title">Add period</legend>
         <input type="hidden" id="care-period-id">
-        <div class="two-col">${this._field("Start date", "care_period_start", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}${this._field("End date", "care_period_end", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}</div>
+        <div class="two-col">${this._field("Start date","care_period_start",o.min,"date",`min="${o.min}" max="${o.max}"`)}${this._field("End date","care_period_end",o.min,"date",`min="${o.min}" max="${o.max}"`)}</div>
         <div class="inline-actions"><button type="button" class="quiet" id="cancel-care-period">Cancel</button><button type="button" class="primary" id="save-care-period">Save period</button></div>
-      </fieldset>`;
-    const modal = this._openModal("Child-care sick leave", fields, "Save settings", async (form) => {
-      const link = String(form.get("care_income_link") || "").split("::");
-      if (link.length !== 2) throw new Error("Select an eligible automatic hourly income.");
-      const linkedIncome = this._state.months[link[0]]?.items.find((entry) => entry.id === link[1]);
-      const selectedBasis = String(form.get("benefit_basis_mode"));
-      const actualIncome = Number(form.get("actual_previous_year_income") || 0);
-      if (selectedBasis === "actual_previous_year_income" && (!Number.isFinite(actualIncome) || actualIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
-      await this._hass.callWS({
-        type: "budget_manager/upsert_item", month: this._month, scope: "this",
-        item: { ...item, name: form.get("name"), expense_type: "child_care_leave", care_leave: {
-          ...care,
-          linked_income_item_id: link[1], linked_income_series_id: linkedIncome?.series_id || "", linked_income_name: linkedIncome?.name || "",
-          income_month: link[0], work_month: this._month, benefit_basis_mode: selectedBasis,
-          actual_previous_year_income: selectedBasis === "actual_previous_year_income" ? actualIncome : 0,
-        } },
-      });
-    }, `<button type="button" class="danger-button" id="delete-care-item">Delete care leave</button>`);
-
-    const basisSelect = modal.root.querySelector("#care-editor-basis");
-    const actualField = modal.root.querySelector("#care-editor-actual-field");
-    const actualInput = actualField.querySelector("input");
-    const basisHelp = modal.root.querySelector("#care-editor-basis-help");
-    const updateBasis = () => {
-      const actual = basisSelect.value === "actual_previous_year_income";
-      actualField.hidden = !actual;
-      actualInput.required = actual;
-      basisHelp.textContent = actual
-        ? "Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides the annual amount by 365. This remains an estimate because official exceptions and eligibility data are not available to Budget Manager."
-        : "The prior-year basis is approximated from this salary's hourly gross rate and Estonia's standard working hours. Use the actual-income option when you know the annual social-taxable amount reported to MTA.";
-    };
-    basisSelect.onchange = updateBasis;
-    updateBasis();
-
-    const periodForm = modal.root.querySelector("#care-period-form");
-    const periodId = modal.root.querySelector("#care-period-id");
-    const periodStart = modal.root.querySelector('[name="care_period_start"]');
-    const periodEnd = modal.root.querySelector('[name="care_period_end"]');
-    const openPeriodForm = (period = null) => {
-      periodForm.hidden = false;
-      periodId.value = period?.id || "";
-      periodStart.value = period?.start || bounds.min;
-      periodEnd.value = period?.end || period?.start || bounds.min;
-      modal.root.querySelector("#care-period-form-title").textContent = period ? "Edit period" : "Add period";
-      periodStart.focus();
-      requestAnimationFrame(() => periodForm.scrollIntoView({ behavior: "smooth", block: "nearest" }));
-    };
-    modal.root.querySelector("#new-care-period").onclick = () => openPeriodForm();
-    modal.root.querySelector("#cancel-care-period").onclick = () => { periodForm.hidden = true; };
-    modal.root.querySelectorAll(".edit-care-period").forEach((button) => {
-      button.onclick = () => openPeriodForm(periods.find((period) => period.id === button.dataset.periodId));
-    });
-    modal.root.querySelector("#save-care-period").onclick = async () => {
-      try {
-        if (!periodStart.value || !periodEnd.value) throw new Error("Select both the start and end dates.");
-        const savedPeriod = await this._hass.callWS({ type: "budget_manager/upsert_care_leave_period", month: this._month, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value } });
-        modal.close();
-        await this._load(this._year);
-        const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
-        if (refreshed) {
-          this._carePeriodToReveal = savedPeriod.id;
-          this._openCareLeaveEditor(refreshed);
-        }
-      } catch (err) { this._showError(err); }
-    };
-    modal.root.querySelectorAll(".delete-care-period").forEach((button) => {
-      button.onclick = async () => {
-        if (!window.confirm("Remove this care-leave period and its generated Tervisekassa income?")) return;
-        try {
-          await this._hass.callWS({ type: "budget_manager/delete_care_leave_period", month: this._month, item_id: item.id, period_id: button.dataset.periodId });
-          modal.close();
-          await this._load(this._year);
-          const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
-          if (refreshed) this._openCareLeaveEditor(refreshed);
-        } catch (err) { this._showError(err); }
-      };
-    });
-    modal.root.querySelector("#delete-care-item").onclick = async () => {
-      if (!window.confirm("Delete this care-leave item, restore the salary estimate, and remove its generated Tervisekassa income?")) return;
-      try {
-        await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope: "this" });
-        modal.close();
-        await this._load(this._year);
-      } catch (err) { this._showError(err); }
-    };
-    if (this._carePeriodToReveal) {
-      const revealId = this._carePeriodToReveal;
-      this._carePeriodToReveal = null;
-      requestAnimationFrame(() => {
-        modal.root.querySelector(`[data-period-id="${CSS.escape(revealId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
-    }
-  }
-
-  async _toggleStatus(itemId, kind) {
-    const item = this._state.months[this._month].items.find((entry) => entry.id === itemId);
-    const complete = item.status === "paid" || item.status === "received";
-    const status = complete ? "pending" : kind === "income" ? "received" : "paid";
-    try {
-      await this._hass.callWS({ type: "budget_manager/set_item_status", month: this._month, item_id: itemId, status });
-      await this._load(this._year);
-    } catch (err) { this._showError(err); }
-  }
-
-  async _deleteMonth() {
-    if (!window.confirm(`Delete ${this._monthLabel(this._month)} and all of its occurrences?`)) return;
-    try {
-      await this._hass.callWS({ type: "budget_manager/delete_month", month: this._month });
-      this._month = null;
-      await this._load(this._year);
-    } catch (err) { this._showError(err); }
-  }
-
-  _showError(err) {
-    this._showToast(err?.message || String(err), false);
-  }
-
-  _showMessage(message) {
-    this._showToast(message, true);
-  }
-
-  _showToast(message, success) {
-    const toast = this.shadowRoot.getElementById("toast");
-    if (!toast) return;
-    toast.textContent = message;
-    toast.classList.toggle("success", success);
-    toast.classList.add("show");
-    setTimeout(() => toast.classList.remove("show"), 5000);
-  }
-
-  _styles() {
-    return `
+      </fieldset>`,u=this._openModal("Child-care sick leave",c,"Save settings",async f=>{let g=String(f.get("care_income_link")||"").split("::");if(g.length!==2)throw new Error("Select an eligible automatic hourly income.");let q=this._state.months[g[0]]?.items.find(ae=>ae.id===g[1]),K=String(f.get("benefit_basis_mode")),I=Number(f.get("actual_previous_year_income")||0);if(K==="actual_previous_year_income"&&(!Number.isFinite(I)||I<=0))throw new Error("Enter the previous calendar year's total social-taxable income.");await this._hass.callWS({type:"budget_manager/upsert_item",month:this._month,scope:"this",item:{...e,name:f.get("name"),expense_type:"child_care_leave",care_leave:{...t,linked_income_item_id:g[1],linked_income_series_id:q?.series_id||"",linked_income_name:q?.name||"",income_month:g[0],work_month:this._month,benefit_basis_mode:K,actual_previous_year_income:K==="actual_previous_year_income"?I:0}}})},'<button type="button" class="danger-button" id="delete-care-item">Delete care leave</button>'),m=u.root.querySelector("#care-editor-basis"),y=u.root.querySelector("#care-editor-actual-field"),k=y.querySelector("input"),w=u.root.querySelector("#care-editor-basis-help"),d=()=>{let f=m.value==="actual_previous_year_income";y.hidden=!f,k.required=f,w.textContent=f?"Enter the previous calendar year's total gross income on which social tax was paid, as reported to MTA. Do not enter net salary or one month's income. Tervisekassa normally divides the annual amount by 365. This remains an estimate because official exceptions and eligibility data are not available to Budget Manager.":"The prior-year basis is approximated from this salary's hourly gross rate and Estonia's standard working hours. Use the actual-income option when you know the annual social-taxable amount reported to MTA."};m.onchange=d,d();let S=u.root.querySelector("#care-period-form"),C=u.root.querySelector("#care-period-id"),v=u.root.querySelector('[name="care_period_start"]'),E=u.root.querySelector('[name="care_period_end"]'),M=(f=null)=>{S.hidden=!1,C.value=f?.id||"",v.value=f?.start||o.min,E.value=f?.end||f?.start||o.min,u.root.querySelector("#care-period-form-title").textContent=f?"Edit period":"Add period",v.focus(),requestAnimationFrame(()=>S.scrollIntoView({behavior:"smooth",block:"nearest"}))};if(u.root.querySelector("#new-care-period").onclick=()=>M(),u.root.querySelector("#cancel-care-period").onclick=()=>{S.hidden=!0},u.root.querySelectorAll(".edit-care-period").forEach(f=>{f.onclick=()=>M(r.find(g=>g.id===f.dataset.periodId))}),u.root.querySelector("#save-care-period").onclick=async()=>{try{if(!v.value||!E.value)throw new Error("Select both the start and end dates.");let f=await this._hass.callWS({type:"budget_manager/upsert_care_leave_period",month:this._month,item_id:e.id,period:{id:C.value||void 0,start:v.value,end:E.value}});u.close(),await this._load(this._year);let g=this._state.months[this._month]?.items.find(q=>q.id===e.id);g&&(this._carePeriodToReveal=f.id,this._openCareLeaveEditor(g))}catch(f){this._showError(f)}},u.root.querySelectorAll(".delete-care-period").forEach(f=>{f.onclick=async()=>{if(window.confirm("Remove this care-leave period and its generated Tervisekassa income?"))try{await this._hass.callWS({type:"budget_manager/delete_care_leave_period",month:this._month,item_id:e.id,period_id:f.dataset.periodId}),u.close(),await this._load(this._year);let g=this._state.months[this._month]?.items.find(q=>q.id===e.id);g&&this._openCareLeaveEditor(g)}catch(g){this._showError(g)}}}),u.root.querySelector("#delete-care-item").onclick=async()=>{if(window.confirm("Delete this care-leave item, restore the salary estimate, and remove its generated Tervisekassa income?"))try{await this._hass.callWS({type:"budget_manager/delete_item",month:this._month,item_id:e.id,scope:"this"}),u.close(),await this._load(this._year)}catch(f){this._showError(f)}},this._carePeriodToReveal){let f=this._carePeriodToReveal;this._carePeriodToReveal=null,requestAnimationFrame(()=>{u.root.querySelector(`[data-period-id="${CSS.escape(f)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"})})}}async _toggleStatus(e,t){let a=this._state.months[this._month].items.find(r=>r.id===e),o=a.status==="paid"||a.status==="received"?"pending":t==="income"?"received":"paid";try{await this._hass.callWS({type:"budget_manager/set_item_status",month:this._month,item_id:e,status:o}),await this._load(this._year)}catch(r){this._showError(r)}}async _deleteMonth(){if(window.confirm(`Delete ${this._monthLabel(this._month)} and all of its occurrences?`))try{await this._hass.callWS({type:"budget_manager/delete_month",month:this._month}),this._month=null,await this._load(this._year)}catch(e){this._showError(e)}}_showError(e){this._showToast(e?.message||String(e),!1)}_showMessage(e){this._showToast(e,!0)}_showToast(e,t){let a=this.shadowRoot.getElementById("toast");a&&(a.textContent=e,a.classList.toggle("success",t),a.classList.add("show"),setTimeout(()=>a.classList.remove("show"),5e3))}_styles(){return`
       :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --blue: #3976a8; --red: #a64a42; --amber: #a36d00; display:block; height:100vh; height:100dvh; overflow:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
       * { box-sizing:border-box; } [hidden] { display:none !important; } button, input, select, textarea { font:inherit; } button { color:inherit; }
       .app,ha-top-app-bar-fixed { height:100%; overflow:hidden; } .app.is-loading { cursor:progress; }
@@ -1537,7 +242,7 @@ class BudgetManagerPanel extends HTMLElement {
       .matrix-title-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-drag-handle { display:inline-flex; flex:0 0 32px; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:var(--ha-border-radius-button,8px); background:transparent; color:var(--secondary-text-color,var(--muted)); cursor:grab; touch-action:none; }.plan-drag-handle:hover,.plan-drag-handle:focus-visible,.plan-drag-handle.active { color:var(--primary-color,var(--green)); background:color-mix(in srgb,var(--primary-color,var(--green)) 12%,transparent); outline:none; }.plan-drag-handle:active,.plan-drag-handle.active { cursor:grabbing; }.plan-drag-handle ha-icon { --mdc-icon-size:22px; }.plan-row-dragging th,.plan-row-dragging td { background:color-mix(in srgb,var(--primary-color,var(--green)) 16%,var(--surface)) !important; box-shadow:inset 0 2px 0 var(--primary-color,var(--green)),inset 0 -2px 0 var(--primary-color,var(--green)); opacity:.72; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-drag-handle { display:inline-flex; flex:0 0 32px; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:var(--ha-border-radius-button,8px); background:transparent; color:var(--secondary-text-color,var(--muted)); cursor:grab; touch-action:none; -webkit-user-select:none; user-select:none; }.plan-drag-handle:hover,.plan-drag-handle:focus-visible,.plan-drag-handle.active { color:var(--primary-color,var(--green)); background:color-mix(in srgb,var(--primary-color,var(--green)) 12%,transparent); outline:none; }.plan-drag-handle:active,.plan-drag-handle.active { cursor:grabbing; }.plan-drag-handle ha-icon { --mdc-icon-size:22px; pointer-events:none; }.plan-sort-chosen,.plan-sort-drag,.plan-sort-fallback { -webkit-user-select:none !important; user-select:none !important; cursor:grabbing; }.plan-sort-chosen th,.plan-sort-chosen td { background:color-mix(in srgb,var(--primary-color,var(--green)) 16%,var(--surface)) !important; box-shadow:inset 0 2px 0 var(--primary-color,var(--green)),inset 0 -2px 0 var(--primary-color,var(--green)); }.plan-sort-ghost { opacity:.35; }.plan-sort-drag,.plan-sort-fallback { opacity:1 !important; background:var(--card-background-color,var(--surface)); box-shadow:0 4px 8px 3px #00000026; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }
@@ -1549,12 +254,14 @@ class BudgetManagerPanel extends HTMLElement {
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
       @media (max-width:700px) { h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) auto; }.more-button { grid-column:3; grid-row:1; }.item-amount { grid-column:3; grid-row:2; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
       @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; } }
-    `;
-  }
-}
+    `}},qa=new URL(import.meta.url).searchParams.get("v")||"dev",da=`budget-manager-panel-${qa.toLowerCase().replace(/[^a-z0-9._-]/g,"-")}`;customElements.get(da)||customElements.define(da,Nt);
+/*! Bundled license information:
 
-const PANEL_MODULE_VERSION = new URL(import.meta.url).searchParams.get("v") || "dev";
-const PANEL_ELEMENT_NAME = `budget-manager-panel-${PANEL_MODULE_VERSION.toLowerCase().replace(/[^a-z0-9._-]/g, "-")}`;
-if (!customElements.get(PANEL_ELEMENT_NAME)) {
-  customElements.define(PANEL_ELEMENT_NAME, BudgetManagerPanel);
-}
+sortablejs/modular/sortable.esm.js:
+  (**!
+   * Sortable 1.15.6
+   * @author	RubaXa   <trash@rubaxa.org>
+   * @author	owenm    <owen23355@gmail.com>
+   * @license MIT
+   *)
+*/

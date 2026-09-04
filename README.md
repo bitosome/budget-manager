@@ -156,10 +156,18 @@ When creating a year without **Overwrite**, existing target months are preserved
 
 ## Development verification
 
+The editable panel source is `custom_components/budget_manager/frontend/budget-manager-panel.src.js`. Install the pinned frontend dependencies and regenerate the production bundle before testing or committing frontend changes:
+
+```bash
+npm ci
+npm run build
+```
+
 The pure calculation and period-copy model is covered by standard-library unit tests:
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --check custom_components/budget_manager/frontend/budget-manager-panel.src.js
 node --check custom_components/budget_manager/frontend/budget-manager-panel.js
 node tests/test_frontend_locale.mjs
 python3 -m compileall -q custom_components tests
