@@ -453,7 +453,7 @@ class BudgetManagerPanel extends HTMLElement {
       return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="kind-dot"></span>${group.label}</th></tr>${groupRows.map((row) => {
         const orderIndex = reorderable.indexOf(row);
         const controls = this._matrixEditMode && orderIndex >= 0
-          ? `<span class="plan-order-controls"><button type="button" data-action="move-plan-row" data-direction="up" title="Move up" aria-label="Move ${this._esc(row.name)} up" ${orderIndex === 0 ? "disabled" : ""}>↑</button><button type="button" data-action="move-plan-row" data-direction="down" title="Move down" aria-label="Move ${this._esc(row.name)} down" ${orderIndex === reorderable.length - 1 ? "disabled" : ""}>↓</button></span>`
+          ? `<button type="button" class="plan-drag-handle" data-action="drag-plan-row" aria-label="Reorder ${this._esc(row.name)}" aria-pressed="false" title="Drag to reorder. Keyboard: Space, arrow keys, then Space to drop"><ha-icon icon="mdi:drag-horizontal-variant"></ha-icon></button>`
           : "";
         const orderData = orderIndex >= 0 ? ` data-plan-kind="${row.kind}" data-plan-order-name="${this._esc(row.orderName)}"` : "";
         return `<tr class="${row.kind}"${orderData}>
@@ -611,6 +611,10 @@ class BudgetManagerPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll('[data-action]:not([data-action="edit-matrix-value"])').forEach((node) => {
       node.addEventListener("click", (event) => this._handleAction(event));
     });
+    this.shadowRoot.querySelectorAll('[data-action="drag-plan-row"]').forEach((handle) => {
+      handle.addEventListener("pointerdown", (event) => this._startPlanPointerDrag(event));
+      handle.addEventListener("keydown", (event) => this._handlePlanDragKeydown(event));
+    });
     this.shadowRoot.querySelectorAll('[data-action="edit-matrix-value"]').forEach((input) => {
       input.addEventListener("change", (event) => this._saveMatrixValue(event.currentTarget));
       input.addEventListener("keydown", (event) => {
@@ -631,7 +635,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "toggle-sticky-column") return this._toggleStickyFirstColumn();
     if (action === "toggle-past-months") return this._togglePastMonths();
     if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
-    if (action === "move-plan-row") return this._movePlanRow(button);
+    if (action === "drag-plan-row") return;
     if (action === "settings") return this._openSettings();
     if (action === "open-month") {
       if (this._matrixEditMode && button.closest(".matrix")) return;
@@ -722,19 +726,38 @@ class BudgetManagerPanel extends HTMLElement {
     }
   }
 
-  async _movePlanRow(button) {
-    const row = button.closest("tr[data-plan-kind][data-plan-order-name]");
-    if (!row) return;
-    const kind = row.dataset.planKind;
-    const rows = [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
-    const index = rows.indexOf(row);
-    const targetIndex = button.dataset.direction === "up" ? index - 1 : index + 1;
-    if (index < 0 || targetIndex < 0 || targetIndex >= rows.length) return;
-    const target = rows[targetIndex];
-    const orderedNames = rows.map((entry) => entry.dataset.planOrderName);
-    [orderedNames[index], orderedNames[targetIndex]] = [orderedNames[targetIndex], orderedNames[index]];
-    const controls = rows.flatMap((entry) => [...entry.querySelectorAll(".plan-order-controls button")]);
-    controls.forEach((control) => { control.disabled = true; });
+  _planRows(kind) {
+    return [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
+  }
+
+  _planRowOrder(kind) {
+    return this._planRows(kind).map((row) => row.dataset.planOrderName);
+  }
+
+  _movePlanRowElement(row, target, before) {
+    if (!row || !target || row === target || row.dataset.planKind !== target.dataset.planKind) return;
+    if (before) target.parentNode.insertBefore(row, target);
+    else target.parentNode.insertBefore(row, target.nextSibling);
+  }
+
+  _planRowAtPoint(kind, clientY) {
+    return this._planRows(kind).find((row) => {
+      const bounds = row.getBoundingClientRect();
+      return clientY >= bounds.top && clientY <= bounds.bottom;
+    });
+  }
+
+  _setPlanDragAppearance(row, handle, active) {
+    row?.classList.toggle("plan-row-dragging", active);
+    handle?.classList.toggle("active", active);
+    handle?.setAttribute("aria-pressed", String(active));
+  }
+
+  async _savePlanRowOrder(kind, originalOrder) {
+    const orderedNames = this._planRowOrder(kind);
+    if (orderedNames.join("\u0000") === originalOrder.join("\u0000")) return;
+    const handles = this._planRows(kind).map((row) => row.querySelector(".plan-drag-handle")).filter(Boolean);
+    handles.forEach((handle) => { handle.disabled = true; });
     try {
       const planItemOrder = await this._hass.callWS({
         type: "budget_manager/update_plan_item_order",
@@ -742,19 +765,97 @@ class BudgetManagerPanel extends HTMLElement {
         names: orderedNames,
       });
       this._state.settings.plan_item_order = planItemOrder;
-      if (button.dataset.direction === "up") row.parentNode.insertBefore(row, target);
-      else row.parentNode.insertBefore(target, row);
+      this._showMessage("Plan order saved.");
     } catch (err) {
+      this._render();
       this._showError(err);
     } finally {
-      const updatedRows = [...this.shadowRoot.querySelectorAll(`tr[data-plan-kind="${kind}"][data-plan-order-name]`)];
-      updatedRows.forEach((entry, rowIndex) => {
-        const up = entry.querySelector('[data-direction="up"]');
-        const down = entry.querySelector('[data-direction="down"]');
-        if (up) up.disabled = rowIndex === 0;
-        if (down) down.disabled = rowIndex === updatedRows.length - 1;
-      });
+      handles.forEach((handle) => { handle.disabled = false; });
     }
+  }
+
+  _startPlanPointerDrag(event) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const handle = event.currentTarget;
+    const row = handle.closest("tr[data-plan-kind][data-plan-order-name]");
+    if (!row) return;
+    event.preventDefault();
+    const kind = row.dataset.planKind;
+    const originalOrder = this._planRowOrder(kind);
+    this._setPlanDragAppearance(row, handle, true);
+    handle.setPointerCapture?.(event.pointerId);
+
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      moveEvent.preventDefault();
+      const target = this._planRowAtPoint(kind, moveEvent.clientY);
+      if (target && target !== row) {
+        const bounds = target.getBoundingClientRect();
+        this._movePlanRowElement(row, target, moveEvent.clientY < bounds.top + bounds.height / 2);
+      }
+      const wrap = this.shadowRoot.querySelector(".matrix-wrap");
+      const wrapBounds = wrap?.getBoundingClientRect();
+      if (wrapBounds && moveEvent.clientY < wrapBounds.top + 42) wrap.scrollTop -= 18;
+      else if (wrapBounds && moveEvent.clientY > wrapBounds.bottom - 42) wrap.scrollTop += 18;
+    };
+    const end = (endEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", cancel);
+      handle.releasePointerCapture?.(event.pointerId);
+      this._setPlanDragAppearance(row, handle, false);
+      this._savePlanRowOrder(kind, originalOrder);
+    };
+    const cancel = (cancelEvent) => {
+      if (cancelEvent.pointerId !== event.pointerId) return;
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", cancel);
+      this._setPlanDragAppearance(row, handle, false);
+      this._render();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", cancel);
+  }
+
+  _handlePlanDragKeydown(event) {
+    const handle = event.currentTarget;
+    const row = handle.closest("tr[data-plan-kind][data-plan-order-name]");
+    if (!row) return;
+    const active = handle.getAttribute("aria-pressed") === "true";
+    if (!active && (event.key === " " || event.key === "Enter")) {
+      event.preventDefault();
+      const kind = row.dataset.planKind;
+      this._keyboardPlanDrag = { row, handle, kind, originalOrder: this._planRowOrder(kind) };
+      this._setPlanDragAppearance(row, handle, true);
+      return;
+    }
+    if (!active) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this._keyboardPlanDrag = null;
+      this._render();
+      return;
+    }
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      const drag = this._keyboardPlanDrag;
+      this._keyboardPlanDrag = null;
+      this._setPlanDragAppearance(row, handle, false);
+      if (drag) this._savePlanRowOrder(drag.kind, drag.originalOrder);
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const rows = this._planRows(row.dataset.planKind);
+    const index = rows.indexOf(row);
+    const targetIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= rows.length) return;
+    const target = rows[targetIndex];
+    if (event.key === "ArrowUp") target.parentNode.insertBefore(row, target);
+    else target.parentNode.insertBefore(target, row);
   }
 
   _openSettings() {
@@ -1285,7 +1386,7 @@ class BudgetManagerPanel extends HTMLElement {
       <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${basisMode === "estimated_hourly" ? "selected" : ""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${basisMode === "actual_previous_year_income" ? "selected" : ""}>Use actual previous-year social-taxable income</option></select></label>
       <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(care.actual_previous_year_income || "")}"></label>
       <p class="form-help" id="care-editor-basis-help"></p>
-      <section class="care-periods"><div class="care-periods-head"><div><strong>Recorded periods</strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">＋ Add period</button></div>${periodRows}</section>
+      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">＋ Add period</button></div><div class="care-period-list">${periodRows}</div></section>
       <fieldset class="settings-group" id="care-period-form" hidden>
         <legend id="care-period-form-title">Add period</legend>
         <input type="hidden" id="care-period-id">
@@ -1436,12 +1537,12 @@ class BudgetManagerPanel extends HTMLElement {
       .matrix-title-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }
       .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
       .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-order-controls { display:inline-flex; flex:0 0 auto; gap:3px; }.plan-order-controls button { width:23px; height:23px; padding:0; border:1px solid var(--line); border-radius:6px; background:var(--page); color:var(--muted); font-weight:800; }.plan-order-controls button:hover:not(:disabled) { color:var(--green); border-color:var(--green); }.plan-order-controls button:disabled { opacity:.3; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
+      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-drag-handle { display:inline-flex; flex:0 0 32px; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:var(--ha-border-radius-button,8px); background:transparent; color:var(--secondary-text-color,var(--muted)); cursor:grab; touch-action:none; }.plan-drag-handle:hover,.plan-drag-handle:focus-visible,.plan-drag-handle.active { color:var(--primary-color,var(--green)); background:color-mix(in srgb,var(--primary-color,var(--green)) 12%,transparent); outline:none; }.plan-drag-handle:active,.plan-drag-handle.active { cursor:grabbing; }.plan-drag-handle ha-icon { --mdc-icon-size:22px; }.plan-row-dragging th,.plan-row-dragging td { background:color-mix(in srgb,var(--primary-color,var(--green)) 16%,var(--surface)) !important; box-shadow:inset 0 2px 0 var(--primary-color,var(--green)),inset 0 -2px 0 var(--primary-color,var(--green)); opacity:.72; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
       .balance-value { display:block; }
       .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { min-height:0; padding:20px; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:disabled { color:var(--muted); opacity:.72; cursor:not-allowed; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
-      .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }.care-periods { max-height:min(42vh,420px); display:grid; gap:0; overflow:auto; overscroll-behavior:contain; border:1px solid var(--line); border-radius:14px; }.care-periods-head,.care-period { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 15px; }.care-periods-head { position:sticky; top:0; z-index:1; background:var(--page); }.care-periods-head div,.care-period > div:first-child { display:grid; gap:3px; }.care-periods-head span,.care-period span { color:var(--muted); font-size:11px; }.care-period { border-top:1px solid var(--line); }.care-period-actions,.inline-actions { display:flex; justify-content:flex-end; gap:8px; }.care-period-actions .danger-button { padding:8px 10px; }.care-benefit-total { color:var(--blue); }
+      .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }.care-periods { min-width:0; overflow:visible; border:1px solid var(--line); border-radius:14px; }.care-periods-head,.care-period { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:13px 15px; }.care-periods-head { background:var(--page); border-radius:13px 13px 0 0; }.care-periods-head > div,.care-period > div:first-child { min-width:0; display:grid; gap:4px; }.care-periods-head span,.care-period span { color:var(--muted); font-size:11px; line-height:1.4; }.care-period-count { display:inline-flex; align-items:center; justify-content:center; min-width:20px; min-height:20px; margin-left:5px; padding:1px 6px; border-radius:999px; background:var(--line); color:var(--ink) !important; font-size:10px !important; }.care-period-list { display:flex; min-width:0; flex-direction:column; }.care-period { flex:0 0 auto; border-top:1px solid var(--line); }.care-period-actions,.inline-actions { display:flex; flex:0 0 auto; justify-content:flex-end; gap:8px; }.care-period-actions .danger-button { padding:8px 10px; }.care-benefit-total { color:var(--blue); }
       #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }.review-notice.care-estimate-notice { border-color:color-mix(in srgb,var(--blue) 62%,var(--line)); background:color-mix(in srgb,var(--blue) 13%,var(--surface)); color:var(--ink); }.review-notice.care-estimate-notice span { color:var(--muted); }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }

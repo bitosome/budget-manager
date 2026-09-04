@@ -29,7 +29,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Concise signed calendar titles such as `Apple iCloud -€9.99` and `Валя +€1873.24`.
 - Create a blank month or copy any specific month.
 - Create a blank 12-month year or copy any specific year.
-- Reorder income and expenditure rows directly in plan edit mode; the custom order is stored with the budget and included in JSON exports.
+- Reorder income and expenditure rows using Home Assistant-style drag handles in plan edit mode; the custom order is stored with the budget and included in JSON exports.
 - Renewal/special-month highlighting.
 - Configurable budget-cycle end day (the 2nd of the following month by default).
 - Independently configurable per-day RAG colors (green from €45/day and yellow from €40/day by default).
@@ -56,7 +56,7 @@ The day divisor is the smaller of the number of days in the budget month and the
 
 Marking an item paid or received only changes its status. It does not change the account balance, which remains a deliberate manual input.
 
-When automatic savings is enabled in Settings, Budget Manager creates one system-managed Savings entry in every existing and newly created month. Its value starts from zero and takes only the money above the configured daily target:
+When automatic savings is enabled in Settings, Budget Manager creates one system-managed Savings entry in every existing and newly created month. System-managed savings never require manual review. Its value starts from zero and takes only the money above the configured daily target:
 
 ```text
 automatic savings = max(0, money before savings - savings target × relevant days)

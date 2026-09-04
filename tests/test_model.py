@@ -1232,7 +1232,12 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_enabling_automatic_savings_populates_every_month(self) -> None:
         self.manager.data["months"]["2026-10"] = model.make_month("2026-10")
         existing = model.normalize_item(
-            {"name": "My savings plan", "kind": "savings", "amount": 350}
+            {
+                "name": "My savings plan",
+                "kind": "savings",
+                "amount": 350,
+                "needs_review": True,
+            }
         )
         self.manager.data["months"]["2026-09"]["items"] = [existing]
 
@@ -1248,6 +1253,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(automatic[0]["name"], "Savings")
             self.assertEqual(automatic[0]["amount"], 0)
             self.assertTrue(automatic[0]["dynamic"])
+            self.assertFalse(automatic[0]["needs_review"])
 
     async def test_automatic_savings_is_created_with_new_month(self) -> None:
         self.manager.data["settings"]["automatic_savings_enabled"] = True

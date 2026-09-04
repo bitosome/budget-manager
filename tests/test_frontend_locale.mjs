@@ -125,5 +125,32 @@ panel._state = {
 };
 const matrix = panel._renderYearMatrix();
 assert.ok(matrix.indexOf('data-plan-order-name="Zulu"') < matrix.indexOf('data-plan-order-name="Alpha"'));
-assert.match(matrix, /data-action="move-plan-row"/);
-assert.match(matrix, /aria-label="Move Zulu down"/);
+assert.match(matrix, /data-action="drag-plan-row"/);
+assert.match(matrix, /aria-label="Reorder Zulu"/);
+assert.match(matrix, /mdi:drag-horizontal-variant/);
+
+const dragHandles = [{ disabled: false }, { disabled: false }];
+const dragRows = ["Zulu", "Alpha"].map((name, index) => ({
+  dataset: { planKind: "expense", planOrderName: name },
+  querySelector: () => dragHandles[index],
+}));
+panel.shadowRoot.querySelectorAll = (selector) => selector.includes('data-plan-kind="expense"') ? dragRows : [];
+let savedOrder;
+panel._hass.callWS = async (message) => {
+  savedOrder = message;
+  return { income: [], expense: message.names };
+};
+panel._showMessage = () => {};
+await panel._savePlanRowOrder("expense", ["Alpha", "Zulu"]);
+assert.deepEqual(savedOrder, {
+  type: "budget_manager/update_plan_item_order",
+  kind: "expense",
+  names: ["Zulu", "Alpha"],
+});
+assert.deepEqual(panel._state.settings.plan_item_order.expense, ["Zulu", "Alpha"]);
+assert.ok(dragHandles.every((handle) => handle.disabled === false));
+
+const styles = panel._styles();
+assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);
+assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
+assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);

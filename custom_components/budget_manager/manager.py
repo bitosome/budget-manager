@@ -271,6 +271,7 @@ class BudgetManager:
             item["special"] = False
             item["special_label"] = ""
             item["notes"] = ""
+            item["needs_review"] = False
             item["series_id"] = None
             item["recurrence"] = RECURRENCE_SINGLE
             item["recurrence_end"] = None
