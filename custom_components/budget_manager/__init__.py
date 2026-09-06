@@ -12,6 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN, NAME, PLATFORMS
 from .manager import BudgetManager
+from .electricity_source import ElectricityCoordinator
 from .model import BudgetValidationError
 from .notifications import BudgetReminderCoordinator
 from .panel import async_register_panel, async_unregister_panel
@@ -30,6 +31,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Register integration-wide APIs and actions."""
     hass.data.setdefault(DOMAIN, {"entries": {}, "panel_registered": False})
     hass.data[DOMAIN].setdefault("reminders", {})
+    hass.data[DOMAIN].setdefault("electricity_coordinators", {})
     async_register_websocket_api(hass)
 
     async def handle_set_balance(call: ServiceCall) -> None:
@@ -138,6 +140,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     reminders = BudgetReminderCoordinator(hass, manager)
     reminders.async_start()
     hass.data[DOMAIN]["reminders"][entry.entry_id] = reminders
+    electricity = ElectricityCoordinator(hass, manager)
+    electricity.start()
+    hass.data[DOMAIN]["electricity_coordinators"][entry.entry_id] = electricity
     return True
 
 
@@ -145,6 +150,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Budget Manager config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
+        electricity = hass.data[DOMAIN]["electricity_coordinators"].pop(entry.entry_id, None)
+        if electricity is not None:
+            electricity.stop()
         reminders = hass.data[DOMAIN]["reminders"].pop(entry.entry_id, None)
         if reminders is not None:
             reminders.async_stop()

@@ -490,11 +490,17 @@ class BudgetManagerPanel extends HTMLElement {
     return `<tr class="summary-row ${tone}"><th>${label}</th>${months.map((monthKey) => {
       const summary = this._state.months[monthKey]?.summary;
       if (!summary) return `<td class="blank">—</td>`;
+      if (summary.incomplete && ["daily_allowance", "remaining", "planned_savings"].includes(key)) return `<td title="Electricity needs data; forecast is incomplete">Needs data</td>`;
       return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}">${this._money(summary[key])}</td>`;
     }).join("")}</tr>`;
   }
 
   _matrixCell(row, item, monthKey) {
+    if (!item && Object.values(row.months || {}).some(entry => entry.expense_type === "electricity")) return `<td class="blank" title="Add electricity occurrences through the month editor">—</td>`;
+    if (item?.expense_type === "electricity") {
+      const missing = item.electricity?.status === "missing";
+      return `<td class="${item.status === "paid" ? "complete" : ""}" title="Electricity is calculated automatically; open the month to edit its settings">${missing ? "Needs data" : this._money(item.effective_amount ?? item.amount)}<small>${item.electricity?.status === "actual" ? "Billed" : item.electricity?.status === "measured" ? "Measured" : "Estimated"}</small></td>`;
+    }
     if (this._matrixEditMode && this._canEdit) {
       if (row.kind === "savings" && this._state.settings.automatic_savings_enabled) {
         if (!item) return `<td class="blank" title="Create this budget month to calculate savings">—</td>`;
@@ -529,6 +535,7 @@ class BudgetManagerPanel extends HTMLElement {
         </div>
         ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item">＋ Add item</button></div>` : ""}
       </section>
+      ${summary.incomplete ? `<p class="form-help care-notice">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
       <section class="metrics">
         ${this._metric("Expected income", summary.expected_income, "income")}
         ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
@@ -552,6 +559,7 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _itemHasMonthlyValue(item) {
+    if (item.expense_type === "electricity") return true;
     if (item.needs_review) return true;
     if (item.kind === "savings" && item.dynamic) return true;
     return Number(item.effective_amount ?? item.amount ?? 0) > 0;
@@ -585,6 +593,7 @@ class BudgetManagerPanel extends HTMLElement {
       ? this._formatDateRange(item.generated?.period_start, item.generated?.period_end)
       : "";
     const displayName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
+    const electric = item.expense_type === "electricity" ? item.electricity : null;
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
       <div class="item-main">
@@ -594,13 +603,14 @@ class BudgetManagerPanel extends HTMLElement {
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.assignee_user_id ? ` · assigned to ${this._esc(this._assigneeName(item.assignee_user_id))} · reminders from ${this._esc(this._formatClockTime(item.reminder_time || "09:00"))}` : ""}
           · ${this._recurrenceLabel(item)}
+          ${electric ? ` · <strong>${electric.status === "actual" ? "Billed electricity" : electric.status === "measured" ? "Measured electricity" : electric.status === "missing" ? "Electricity needs data" : "Estimated electricity"}</strong> · ${this._monthLabel(electric.consumption_month)} consumption${electric.status !== "missing" ? ` · accumulated ${this._money(electric.grid_cost)} · fixed fees ${this._money(electric.fixed_fees)} · buffer ${this._money(electric.buffer)}` : ""}${electric.warning ? ` · ${this._esc(electric.warning)}` : ""}` : ""}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
           ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
           ${item.automatic_savings ? ` · calculated to leave ${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
       </div>
-      <strong class="item-amount">${this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
+      <strong class="item-amount">${electric?.status === "missing" ? "Needs data" : this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
       ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="more-button" data-action="edit-item" data-id="${item.id}" title="Edit">•••</button>` : ""}
     </article>`;
   }
@@ -905,6 +915,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
+    <fieldset class="settings-group"><legend>Smart electricity</legend><p class="form-help">Configure grid-cost sources, fixed monthly fees and local forecast learning. Electricity is billed in the month after consumption.</p><button type="button" class="quiet" id="electricity-settings">Electricity settings</button></fieldset>
     <fieldset class="settings-group"><legend>Categories</legend>
       <p class="form-help">Rename a category to update its uses in all months. Removing a category leaves those items uncategorized.</p>
       <div id="category-list">${(settings.categories || []).map((name) => this._categoryEditorRow(name)).join("")}</div>
@@ -937,6 +948,7 @@ class BudgetManagerPanel extends HTMLElement {
       });
     });
     const categoryList = modal.root.querySelector("#category-list");
+    modal.root.querySelector("#electricity-settings").onclick = () => this._openElectricitySettings();
     modal.root.querySelector("#add-category").onclick = () => {
       categoryList.insertAdjacentHTML("beforeend", this._categoryEditorRow(""));
       categoryList.lastElementChild.querySelector("input").focus();
@@ -956,6 +968,69 @@ class BudgetManagerPanel extends HTMLElement {
 
   _categoryEditorRow(name) {
     return `<div class="category-editor-row"><input name="category-name" aria-label="Category name" value="${this._esc(name)}" data-original="${this._esc(name)}" maxlength="100" required><button type="button" class="quiet" data-remove-category>Remove</button></div>`;
+  }
+
+  _electricityFeeRow(fee = {}) {
+    return `<div class="electricity-fee settings-group">${this._field("Fee name", "fee-name", fee.name || "", "text", "required")}${this._field("Monthly amount including VAT, EUR", "fee-amount", fee.amount ?? "", "number", "min=0 step=0.01 required")}<div class="two-col">${this._field("From consumption month (optional)", "fee-from", fee.from_month || "", "month")}${this._field("Through consumption month (optional)", "fee-to", fee.to_month || "", "month")}</div><button type="button" class="danger-button" data-remove-fee>Remove fee</button></div>`;
+  }
+
+  _openElectricitySettings() {
+    const config = this._state.settings.electricity || {};
+    const state = this._state.electricity || {};
+    const model = state.model || {};
+    const sensorField = (label, name, unit) => {
+      const candidates = Object.entries(this._hass.states || {}).filter(([id, s]) => id.startsWith("sensor.") && unit.includes(s.attributes?.unit_of_measurement));
+      return `<label><span>${label}</span><input name="${name}" list="${name}-options" value="${this._esc(config[name] || "")}" placeholder="sensor.…"><datalist id="${name}-options">${candidates.map(([id, s]) => `<option value="${this._esc(id)}">${this._esc(s.attributes.friendly_name || id)}</option>`).join("")}</datalist></label>`;
+    };
+    const fields = `<p class="form-help">All amounts are EUR including VAT. Choose the same cost/consumption statistics used by Home Assistant Energy. The cost must already include all variable network charges and taxes; add only missing fixed fees below.</p>
+      ${sensorField("Accumulated grid cost statistic (EUR)", "cost_statistic_id", ["EUR", "€"])}
+      ${sensorField("Grid consumption statistic (kWh)", "energy_statistic_id", ["kWh"])}
+      ${sensorField("Real electricity price sensor (reference, optional)", "price_entity_id", ["€/kWh", "EUR/kWh"])}
+      <fieldset class="settings-group"><legend>Fixed monthly fees</legend><p class="form-help">Separate fees are added once per consumption month, not once per day. Date ranges let you schedule tariff changes.</p><div id="electricity-fees">${(config.fees || []).map(f => this._electricityFeeRow(f)).join("")}</div><button type="button" class="quiet" id="add-electricity-fee">＋ Add fee</button></fieldset>
+      <fieldset class="settings-group"><legend>Forecast and learning</legend>
+      <label><span>Estimation method</span><select name="method"><option value="adaptive" ${config.method !== "recent_average" ? "selected" : ""}>Adaptive seasonal regression</option><option value="recent_average" ${config.method === "recent_average" ? "selected" : ""}>Recent weighted average</option></select></label>
+      <label class="check"><input type="checkbox" name="learning_enabled" ${config.learning_enabled !== false ? "checked" : ""}><span>Learn automatically from completed months</span></label>
+      <p class="form-help">Pausing learning freezes the fitted model; measured costs continue updating. The model runs locally without a cloud AI service. Price adaptation uses recent consumption-weighted costs, not one volatile hourly price.</p>
+      <div class="two-col">${this._field("Buffer on unmeasured costs, %", "buffer_percent", config.buffer_percent ?? 15, "number", "min=0 max=200 step=1 required")}${this._field("Recent-price weight, %", "live_price_weight", config.live_price_weight ?? 50, "number", "min=0 max=100 step=1 required")}${this._field("History window, months", "history_months", config.history_months ?? 36, "number", "min=3 max=60 step=1 required")}${this._field("Learning half-life, months", "half_life_months", config.half_life_months ?? 6, "number", "min=1 max=36 step=1 required")}</div>
+      <p class="form-help">Fallback values are used before sufficient data is available. Leave both at zero to show Needs data instead of inventing an estimate.</p><div class="two-col">${this._field("Fallback monthly consumption, kWh", "fallback_monthly_kwh", config.fallback_monthly_kwh ?? 0, "number", "min=0 max=100000 step=0.01 required")}${this._field("Fallback variable price, EUR/kWh", "fallback_price", config.fallback_price ?? 0, "number", "min=0 max=10 step=0.00001 required")}</div></fieldset>
+      <fieldset class="settings-group"><legend>Model status</legend><p>${model.samples || 0} training months · ${model.trained_through ? `through ${this._monthLabel(model.trained_through)}` : "not trained"}</p><p class="form-help">Walk-forward error (before buffer): ${state.diagnostics?.mae_eur != null ? `${this._money(state.diagnostics.mae_eur)} mean absolute error across ${state.diagnostics.evaluated_months} months` : "not enough earlier months to evaluate"}. Historical performance does not guarantee future prices.</p>${state.warning ? `<p class="form-help">${this._esc(state.warning)}</p>` : ""}<div class="data-actions"><button type="button" class="quiet" id="electricity-history">Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p class="form-help">Save settings before using these controls. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
+    const modal = this._openModal("Electricity settings", fields, "Save settings", async form => {
+      const electricity = {...config};
+      for (const key of ["cost_statistic_id", "energy_statistic_id", "price_entity_id", "method"]) electricity[key] = String(form.get(key) || "").trim();
+      for (const key of ["buffer_percent", "live_price_weight", "history_months", "half_life_months", "fallback_monthly_kwh", "fallback_price"]) electricity[key] = Number(form.get(key));
+      electricity.learning_enabled = form.has("learning_enabled");
+      electricity.fees = [...modal.root.querySelectorAll(".electricity-fee")].map(row => ({name:row.querySelector('[name="fee-name"]').value,amount:Number(row.querySelector('[name="fee-amount"]').value),from_month:row.querySelector('[name="fee-from"]').value || null,to_month:row.querySelector('[name="fee-to"]').value || null}));
+      await this._hass.callWS({type:"budget_manager/update_settings",changes:{electricity}});
+      await this._hass.callWS({type:"budget_manager/electricity",action:"refresh"});
+    });
+    modal.root.querySelector("#add-electricity-fee").onclick = () => modal.root.querySelector("#electricity-fees").insertAdjacentHTML("beforeend",this._electricityFeeRow());
+    modal.root.querySelector("#electricity-fees").onclick = event => event.target.closest('[data-remove-fee]')?.closest('.electricity-fee').remove();
+    modal.root.querySelector("#electricity-history").onclick = () => this._openElectricityHistory();
+    modal.root.querySelectorAll('[data-electricity-action]').forEach(button => button.onclick = async () => {
+      if (button.dataset.electricityAction === "reset" && !window.confirm("Reset the learned model and pause learning? Historical bills are retained.")) return;
+      button.disabled = true;
+      try { await this._hass.callWS({type:"budget_manager/electricity",action:button.dataset.electricityAction}); modal.close(); await this._load(); this._openElectricitySettings(); }
+      catch(err) { this._showError(err); button.disabled = false; }
+    });
+  }
+
+  _openElectricityHistory(imported) {
+    const state = this._state.electricity || {};
+    const observations = Object.fromEntries(Object.entries(state.observations || {}).filter(([key]) => !(state.ignored_months || []).includes(key)));
+    const records = imported || Object.values({...observations,...state.history}).sort((a,b)=>a.month.localeCompare(b.month));
+    const rowHtml = row => `<div class="electricity-history-row settings-group"><div class="two-col">${this._field("Consumption month", "history-month", row.month || "", "month", "required")}${this._field("Consumption, kWh", "history-kwh", row.kwh ?? "", "number", "min=0 step=0.001 required")}${this._field("Variable grid cost incl. VAT, EUR", "history-cost", row.grid_cost ?? "", "number", "step=0.01 required")}${this._field("Billed fixed fees incl. VAT, EUR", "history-fees", row.fixed_fees ?? 0, "number", "min=0 step=0.01 required")}</div><label class="check"><input type="checkbox" name="history-enabled" ${row.enabled !== false ? "checked" : ""}><span>Use this month for training</span></label><input type="hidden" name="history-source" value="${this._esc(row.source || "manual")}"><button type="button" class="danger-button" data-remove-history>Remove month</button></div>`;
+    const modal = this._openModal("Electricity history", `<p class="form-help">Completed consumption months only. Variable grid cost is the full invoice total minus its fixed fees, including VAT. Combine supplier-change partial bills into one month. Uncheck outliers to exclude them from training while retaining their actual bill. Saving makes these rows the confirmed history; confirmed data takes priority over Recorder.</p><div class="data-actions"><button type="button" class="quiet" id="import-electricity-history">Import JSON</button><button type="button" class="quiet" id="export-electricity-history">Export JSON</button><input type="file" id="electricity-history-file" accept=".json,application/json" hidden><button type="button" class="quiet" id="add-electricity-month">＋ Month</button></div><div id="electricity-history-rows">${records.map(rowHtml).join("")}</div>`, "Save history", async () => {
+      await this._hass.callWS({type:"budget_manager/electricity",action:"history",document:getDocument()});
+    });
+    const getDocument = () => ({format:"budget-manager-electricity-history",version:1,records:[...modal.root.querySelectorAll('.electricity-history-row')].map(row=>({month:row.querySelector('[name="history-month"]').value,kwh:Number(row.querySelector('[name="history-kwh"]').value),grid_cost:Number(row.querySelector('[name="history-cost"]').value),fixed_fees:Number(row.querySelector('[name="history-fees"]').value),enabled:row.querySelector('[name="history-enabled"]').checked,source:row.querySelector('[name="history-source"]').value}))});
+    modal.root.querySelector('#electricity-history-rows').onclick = event => event.target.closest('[data-remove-history]')?.closest('.electricity-history-row').remove();
+    modal.root.querySelector('#add-electricity-month').onclick = () => modal.root.querySelector('#electricity-history-rows').insertAdjacentHTML('beforeend',rowHtml({}));
+    modal.root.querySelector('#export-electricity-history').onclick = () => {
+      const url=URL.createObjectURL(new Blob([JSON.stringify(getDocument(),null,2)],{type:'application/json'})); const link=document.createElement('a');link.href=url;link.download='budget-manager-electricity-history.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    };
+    const file=modal.root.querySelector('#electricity-history-file');
+    modal.root.querySelector('#import-electricity-history').onclick=()=>file.click();
+    file.onchange=async()=>{try{if(!file.files?.[0])return;if(file.files[0].size>2*1024*1024)throw new Error('History file exceeds 2 MB');const data=JSON.parse(await file.files[0].text());if(data.format!=='budget-manager-electricity-history'||data.version!==1||!Array.isArray(data.records)||data.records.length>1200)throw new Error('Not an electricity history file');if(!window.confirm('Replace the history editor with this file? Review it, then Save history to apply.'))return;this._openElectricityHistory(data.records);}catch(err){this._showError(err);}};
   }
 
   _recurrenceLabel(item) {
@@ -1140,10 +1215,11 @@ class BudgetManagerPanel extends HTMLElement {
     const fields = `
       ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
       <div class="two-col">
-        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option>${!this._state.settings.automatic_savings_enabled || item?.kind === "savings" ? `<option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option>` : ""}<option value="care_leave">Child-care sick leave</option></select></label>
+        <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" && item?.expense_type !== "electricity" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option>${!this._state.settings.automatic_savings_enabled || item?.kind === "savings" ? `<option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option>` : ""}<option value="electricity" ${item?.expense_type === "electricity" ? "selected" : ""}>Electricity (smart)</option><option value="care_leave">Child-care sick leave</option></select></label>
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
+      <p class="form-help" id="electricity-item-help" hidden>Calculated from the previous calendar month's electricity use plus fixed fees. During that month it projects the full bill; later months use local forecasts and the configured buffer. Sources, fees and learning are managed in Settings → Electricity settings. Checking this expense freezes its amount as paid.</p>
       ${item && ["income", "expense"].includes(item.kind) ? `<p class="form-help">Names are shared across all months. When you save a recurring item, you can choose which occurrences receive the other changes.</p>` : ""}
       <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
         <legend>Child-care sick leave</legend>
@@ -1206,7 +1282,8 @@ class BudgetManagerPanel extends HTMLElement {
       const recurrence = form.get("recurrence");
       const selectedKind = form.get("kind");
       const isCareLeave = selectedKind === "care_leave";
-      const kind = isCareLeave ? "expense" : selectedKind;
+      const isElectricity = selectedKind === "electricity";
+      const kind = isCareLeave || isElectricity ? "expense" : selectedKind;
       const useEstonianHourly = kind === "income" && form.has("estonian_hourly");
       const hourlyGross = Number(form.get("hourly_gross"));
       const workingHours = Number(form.get("working_hours"));
@@ -1229,14 +1306,14 @@ class BudgetManagerPanel extends HTMLElement {
         scope,
         item: {
           ...(item || {}),
-          name: form.get("name"), kind, amount: isCareLeave ? 0 : Number(form.get("amount")),
+          name: form.get("name"), kind, amount: isCareLeave ? 0 : isElectricity ? item?.amount || 0 : Number(form.get("amount")),
           due_day: dueDay,
           assignee_user_id: assigneeUserId || null,
           reminder_time: assigneeUserId ? String(form.get("reminder_time") || "09:00") : null,
           category: isCareLeave ? "Care leave" : form.get("category"), recurrence: isCareLeave ? "single" : recurrence,
           recurrence_interval: recurrence === "custom" ? Number(form.get("recurrence_interval")) : 1,
           recurrence_end: isCareLeave || recurrence === "single" || form.get("recurrence_end_mode") === "never" ? null : form.get("recurrence_end"),
-          expense_type: isCareLeave ? "child_care_leave" : "standard",
+          expense_type: isCareLeave ? "child_care_leave" : isElectricity ? "electricity" : "standard",
           care_leave: isCareLeave ? {
             linked_income_item_id: careLink[1],
             linked_income_series_id: linkedIncome?.series_id || "",
@@ -1385,6 +1462,8 @@ class BudgetManagerPanel extends HTMLElement {
     const updateKind = () => {
       const savingsVisible = kindSelect.value === "savings";
       const careVisible = kindSelect.value === "care_leave";
+      const electricityVisible = kindSelect.value === "electricity";
+      modal.root.querySelector('#electricity-item-help').hidden = !electricityVisible;
       dynamicSavings.hidden = !savingsVisible;
       dynamicSavingsHelp.hidden = !savingsVisible;
       incomeSection.hidden = kindSelect.value !== "income";
@@ -1413,6 +1492,20 @@ class BudgetManagerPanel extends HTMLElement {
         amountLabel.textContent = "Amount";
       }
       if (savingsVisible && amountInput.value === "") amountInput.value = "0";
+      if (electricityVisible) {
+        amountInput.disabled = true;
+        amountInput.placeholder = "Calculated automatically";
+        amountInput.value = "";
+        amountLabel.textContent = "Amount · automatic";
+        amountInput.dataset.electricityDisabled = "true";
+        if (!nameInput.value.trim()) nameInput.value = "Electricity";
+        if (!item && recurrenceSelect.value === "single") recurrenceSelect.value = "monthly";
+      } else if (amountInput.dataset.electricityDisabled === "true") {
+        amountInput.dataset.electricityDisabled = "false";
+        amountInput.disabled = careVisible;
+        amountInput.placeholder = careVisible ? "Not applicable" : "";
+        amountLabel.textContent = careVisible ? "Amount · not applicable" : "Amount";
+      }
       updateEnd();
       updatePayrollControls();
       updateCareBasis();

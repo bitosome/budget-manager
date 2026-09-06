@@ -50,8 +50,22 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         ws_set_item_status,
         ws_estonian_working_hours,
         ws_notification_assignees,
+        ws_electricity,
     ):
         websocket_api.async_register_command(hass, command)
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/electricity",
+    vol.Required("action"): vol.In(["history", "retrain", "reset", "refresh"]),
+    vol.Optional("document"): dict})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_electricity(hass, connection, msg):
+    try:
+        await _manager(hass).async_electricity_action(msg["action"], msg.get("document"))
+        connection.send_result(msg["id"], {"success": True})
+    except (BudgetValidationError, ValueError) as err:
+        _error(connection, msg, err)
 
 
 @websocket_api.websocket_command(

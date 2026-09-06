@@ -221,3 +221,11 @@ const styles = panel._styles();
 assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);
 assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);
+
+const electricItem = {id:"electric", name:"Electricity",kind:"expense",expense_type:"electricity",amount:120,status:"pending",electricity:{status:"measured",consumption_month:"2026-08"}};
+assert.equal(panel._itemHasMonthlyValue({...electricItem, amount:0}), true);
+panel._matrixEditMode = true;
+const electricCell = panel._matrixCell({months:{"2026-09":electricItem}},electricItem,"2026-09");
+assert.match(electricCell, /Measured/);
+assert.doesNotMatch(electricCell, /<input|data-action=/);
+assert.doesNotMatch(panel._matrixCell({months:{"2026-09":electricItem}},null,"2026-10"), /<input/);

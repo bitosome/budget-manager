@@ -106,6 +106,39 @@ The built-in 2026 approximation follows Tervisekassa's published child-care rule
 
 Add `https://github.com/bitosome/budget-manager` to HACS as an **Integration**, install it, restart Home Assistant, and add **Budget Manager** from Devices & services.
 
+## Smart Electricity expenditure
+
+Choose **Electricity (smart)** when adding an expenditure, with monthly recurrence and the desired due day. Add one such expenditure per month for the configured household electricity supply. Its amount is calculated automatically; it cannot be overwritten in the plan table. Marking it paid freezes that amount, and reopening it resumes calculation.
+
+In **Budget → Settings → Electricity settings**:
+
+1. Select the accumulated grid-cost statistic in **EUR** and grid-consumption statistic in **kWh** used by Home Assistant Energy. Both must have Recorder sum statistics. The current sensor state is not a monthly bill: Budget Manager reads reset-safe hourly changes from Recorder, using Home Assistant's timezone and handling daylight-saving transitions.
+2. Ensure the cost source includes variable network charges, taxes and VAT. For example, Energy can calculate cost from a consumption meter and a `real-electricity-price` all-inclusive price sensor. Budget Manager uses the resulting cost statistic; it does not integrate a price sensor by itself. The optional price-reference field is diagnostic only, not an instantaneous-price forecast input.
+3. Add each missing **fixed monthly fee including VAT** separately. Optional start/end months refer to consumption months. Do not add charges already included in the cost source.
+4. Import or enter completed monthly bills in **Review / import history**. Enter consumption, the total bill minus fixed fees, and the billed fixed fees separately. Combine partial supplier bills for the same consumption month before importing. Confirmed bills override measured Recorder data. Uncheck a month to exclude it from learning while retaining its bill; removing a Recorder month also suppresses it on later refreshes until it is added again.
+
+The payment month always follows the consumption month: October uses September. During September, October shows measured cost so far plus a projection of the remainder and fixed fees. Later payments use a local forecast. **Billed**, **Measured**, and **Estimated** labels distinguish invoice totals, complete Recorder measurements, and forecasts. Recorder measurements can differ from supplier invoices; importing the invoice reconciles that month. Incomplete measured months are not treated as complete bills.
+
+The lightweight local model fits regularized seasonal regressions for daily consumption and variable unit price, weighting recent months more heavily. With fewer than six training months it uses a weighted average; with no usable history it uses explicitly configured fallback consumption and price. A multi-day consumption-weighted price average adapts forecasts to recent changes. The configurable buffer applies only to **unmeasured variable costs**, never to already measured costs or fixed fees. It is a planning margin, not a guarantee against future price spikes.
+
+Settings expose the method, history window, learning half-life, recent-price weight, buffer, fallbacks, training sample count and walk-forward mean absolute error before the buffer. Pause automatic learning to freeze fitted weights, retrain manually, or reset the model while retaining history. Measured costs keep updating when learning is paused. Statistics refresh hourly and on startup; use the panel's refresh button to load updated values into an already-open view. No cloud AI service, GPU or large ML dependency is required. Training runs locally on completed months, never on forecast values or partial months.
+
+Without usable history or fallbacks, Electricity displays **Needs data**, budget totals are explicitly incomplete, and automatic savings transfers are paused. It cannot be marked paid until a value can be calculated. No zero-value payment events are created for missing electricity data.
+
+Electricity history, settings and model inputs are included in the full budget export. Import rebuilds the model from validated history rather than trusting a supplied model payload. A dedicated electricity-history JSON import/export is also available (synthetic example):
+
+```json
+{
+  "format": "budget-manager-electricity-history",
+  "version": 1,
+  "records": [
+    {"month": "2026-01", "kwh": 1000, "grid_cost": 200, "fixed_fees": 15, "enabled": true, "source": "bill"}
+  ]
+}
+```
+
+Invoice history is private household data. No personal invoices, pretrained household model or Gmail credentials are distributed with the integration. Reviewing bills in Gmail is a separate data-preparation step; the installed integration does not access Gmail.
+
 ## Home Assistant entities
 
 - `sensor.budget_manager_daily_allowance`

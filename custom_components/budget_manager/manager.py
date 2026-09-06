@@ -21,6 +21,7 @@ from .estonian_care_leave import (
     normalize_care_period,
 )
 from .estonian_calendar import EstonianWorkingHoursProvider
+from . import electricity
 from .estonian_payroll import (
     EstonianPayrollError,
     calculate_estonian_payroll,
@@ -80,6 +81,7 @@ class BudgetManager:
         )
         self._data: dict[str, Any] = empty_data()
         self._lock = asyncio.Lock()
+        self._electricity_refresh_lock = asyncio.Lock()
         self._listeners: set[Callable[[], None]] = set()
         self._estonian_calendar = EstonianWorkingHoursProvider(hass)
 
@@ -148,11 +150,13 @@ class BudgetManager:
             "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
         ):
             self._ensure_automatic_savings_for_all_months()
-        self._data["schema_version"] = 12
+        self._data["schema_version"] = 13
+        self._data.setdefault("electricity", electricity.empty_state())
         self._sync_categories()
         self._discover_open_recurrences()
         await self._extend_open_recurrences(f"{self.today().year + 1}-12")
         await self._async_rebuild_all_care_leave_effects()
+        self._rebuild_electricity()
         await self._store.async_save(self._data)
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -165,6 +169,7 @@ class BudgetManager:
         return remove_listener
 
     async def _async_commit(self) -> None:
+        self._rebuild_electricity()
         await self._store.async_save(self._data)
         for listener in tuple(self._listeners):
             listener()
@@ -193,6 +198,7 @@ class BudgetManager:
             "available_months": sorted(self._data["months"]),
             "current_month": current,
             "selected_year": selected_year,
+            "electricity": deepcopy(self._data.get("electricity", electricity.empty_state())),
             "plan_years": list(plan_years),
             "year": calculate_year(self._data, selected_year, today=today),
             "months": {
@@ -391,6 +397,17 @@ class BudgetManager:
                 "Automatic savings setting must be true or false"
             )
         async with self._lock:
+            if "electricity" in changes:
+                try:
+                    electricity_settings = electricity.normalize_settings(changes["electricity"])
+                except ValueError as err:
+                    raise BudgetValidationError(str(err)) from err
+                previous_source = settings.get("electricity", {})
+                if any(electricity_settings.get(key) != previous_source.get(key)
+                       for key in ("cost_statistic_id", "energy_statistic_id")):
+                    self._data.setdefault("electricity", electricity.empty_state())["observations"] = {}
+                    self._data["electricity"]["live"] = {}
+                settings["electricity"] = electricity_settings
             if "categories" in changes:
                 categories = normalize_categories(changes["categories"])
                 renames = changes.get("category_renames", {})
@@ -426,6 +443,79 @@ class BudgetManager:
             yield from month.get("items", [])
         for rule in self._data.get("recurrence_rules", {}).values():
             yield rule["template"]
+
+    def _rebuild_electricity(self):
+        state = self._data.setdefault("electricity", electricity.empty_state())
+        settings = self._data["settings"].setdefault("electricity", electricity.normalize_settings())
+        history = electricity.combined_history(state)
+        current = self.today().strftime("%Y-%m")
+        if settings["learning_enabled"] or not state.get("model"):
+            state["model"] = electricity.train(history, settings, current)
+            state["diagnostics"] = electricity.backtest(history, settings)
+        for key, month in self._data["months"].items():
+            for item in month["items"]:
+                if item.get("expense_type") != electricity.ELECTRICITY_TYPE or item["status"] != STATUS_PENDING:
+                    continue
+                details = electricity.forecast(key, settings, history, state["model"], state.get("live", {}), self.today())
+                item["electricity"] = details
+                item["amount"] = details["amount"]
+                item["needs_review"] = False
+
+    async def async_refresh_electricity(self, *, full=False):
+        from .electricity_source import async_read_statistics
+        async with self._electricity_refresh_lock:
+            settings = deepcopy(self._data["settings"].get("electricity", electricity.normalize_settings()))
+            if not settings["cost_statistic_id"] or not settings["energy_statistic_id"]:
+                return
+            try:
+                observations, live, warning = await async_read_statistics(self.hass, settings, full=full)
+            except Exception:
+                # Keep the last good data and mark it stale. Never replace missing readings with zero.
+                async with self._lock:
+                    state = self._data.setdefault("electricity", electricity.empty_state())
+                    state["warning"] = "Electricity statistics are unavailable; retaining the last data"
+                    state["live"] = {}
+                    await self._async_commit()
+                return
+            async with self._lock:
+                if settings != self._data["settings"]["electricity"]:
+                    return
+                state = self._data.setdefault("electricity", electricity.empty_state())
+                state["observations"].update(observations)
+                state["live"] = live
+                state["warning"] = warning
+                await self._async_commit()
+
+    async def async_electricity_action(self, action, document=None):
+        if action == "refresh":
+            await self.async_refresh_electricity(full=True)
+            return
+        async with self._transaction():
+            state = self._data.setdefault("electricity", electricity.empty_state())
+            settings = self._data["settings"]["electricity"]
+            if action == "history":
+                if not isinstance(document, dict) or document.get("format") != electricity.HISTORY_FORMAT or document.get("version") != 1:
+                    raise BudgetValidationError("Not an electricity history file")
+                try:
+                    rows = electricity.normalize_history(document.get("records"))
+                except ValueError as err:
+                    raise BudgetValidationError(str(err)) from err
+                if any(key >= self.today().strftime("%Y-%m") for key in rows):
+                    raise BudgetValidationError("Training history accepts completed past months only")
+                state["history"] = rows
+                # Keep deleted Recorder months deleted across hourly refreshes.
+                state["ignored_months"] = sorted((set(state.get("ignored_months", []))
+                    | set(state.get("observations", {}))) - set(rows))
+            elif action == "retrain":
+                state["model"] = electricity.train(electricity.combined_history(state), settings, self.today().strftime("%Y-%m"))
+                state["diagnostics"] = electricity.backtest(electricity.combined_history(state), settings)
+            elif action == "reset":
+                settings["learning_enabled"] = False
+                state["model"] = {"samples": 0, "method": settings["method"], "trained_through": None}
+                state["diagnostics"] = {}
+            else:
+                raise BudgetValidationError("Unknown electricity action")
+            await self._async_commit()
 
     def _sync_categories(self) -> None:
         categories = list(self._data["settings"].get("categories", []))
@@ -1514,6 +1604,10 @@ class BudgetManager:
                 status = STATUS_RECEIVED
             if item["kind"] in {"expense", KIND_SAVINGS} and status == STATUS_RECEIVED:
                 status = STATUS_PAID
+            if item.get("expense_type") == electricity.ELECTRICITY_TYPE and status == STATUS_PAID:
+                self._rebuild_electricity()
+                if item.get("electricity", {}).get("status") == "missing":
+                    raise BudgetValidationError("Configure electricity data before marking this expense paid")
             if (
                 item["kind"] == KIND_SAVINGS
                 and item.get("dynamic", True)
@@ -1525,6 +1619,8 @@ class BudgetManager:
                     settings=self._data.get("settings"),
                     today=self.today(),
                 )
+                if item.get("automatic_savings") and summary.get("incomplete"):
+                    raise BudgetValidationError("Configure missing electricity data before transferring automatic savings")
                 item["amount"] = summary["effective_amounts"].get(
                     item["id"], item.get("amount", 0)
                 )

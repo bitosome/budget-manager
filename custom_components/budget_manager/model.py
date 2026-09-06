@@ -18,6 +18,7 @@ from .estonian_care_leave import (
     normalize_care_leave,
 )
 from .estonian_payroll import EstonianPayrollError, normalize_income_calculation
+from . import electricity
 
 from .const import (
     DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
@@ -141,7 +142,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 12,
+        "schema_version": 13,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -154,9 +155,11 @@ def empty_data() -> dict[str, Any]:
             "automatic_savings_enabled": DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
             "plan_item_order": {KIND_INCOME: [], KIND_EXPENSE: []},
             "categories": [],
+            "electricity": electricity.normalize_settings(),
         },
         "months": {},
         "recurrence_rules": {},
+        "electricity": electricity.empty_state(),
     }
 
 
@@ -260,7 +263,7 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         if kind == KIND_EXPENSE
         else "standard"
     )
-    if expense_type not in {"standard", CARE_LEAVE_TYPE}:
+    if expense_type not in {"standard", CARE_LEAVE_TYPE, electricity.ELECTRICITY_TYPE}:
         raise BudgetValidationError("Unsupported expenditure type")
     is_care_leave = kind == KIND_EXPENSE and expense_type == CARE_LEAVE_TYPE
     if is_care_leave and recurrence != RECURRENCE_SINGLE:
@@ -307,6 +310,7 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         "needs_review": bool(raw.get("needs_review", False)),
         "income_calculation": income_calculation,
         "expense_type": expense_type,
+        "electricity": deepcopy(raw.get("electricity")) if expense_type == electricity.ELECTRICITY_TYPE and isinstance(raw.get("electricity"), dict) else None,
         "care_leave": care_leave,
         "generated_type": generated_type,
         "generated": dict(generated) if isinstance(generated, dict) else None,
@@ -484,6 +488,7 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
     defaults = empty_data()["settings"]
     settings = data.get("settings", {})
     portable_settings = {
+        "electricity": electricity.normalize_settings(settings.get("electricity")),
         "categories": normalize_categories(settings.get("categories", [])),
         "currency": str(settings.get("currency", defaults["currency"])),
         "locale": str(settings.get("locale", defaults["locale"])),
@@ -535,6 +540,7 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
         "settings": portable_settings,
         "months": months,
         "recurrence_rules": deepcopy(data.get("recurrence_rules", {})),
+        "electricity": deepcopy(data.get("electricity", electricity.empty_state())),
     }
 
 
@@ -652,6 +658,11 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
         result["recurrence_rules"][series_id] = {
             "template": template, "start": start, "through": through,
         }
+    try:
+        result["settings"]["electricity"] = electricity.normalize_settings(raw_settings.get("electricity"))
+        result["electricity"] = electricity.normalize_state(document.get("electricity", {}))
+    except ValueError as err:
+        raise BudgetValidationError(str(err)) from err
     return result
 
 
@@ -666,6 +677,9 @@ def calculate_month(
     month_key = validate_month_key(month["month"])
     year, month_number = month_parts(month_key)
     items = month.get("items", [])
+    incomplete = any(item.get("expense_type") == electricity.ELECTRICITY_TYPE
+        and item_is_open(item) and item.get("electricity", {}).get("status") == "missing"
+        for item in items)
     green_threshold, yellow_threshold = normalize_thresholds(settings)
     savings_target_threshold, savings_floor_threshold = (
         normalize_savings_thresholds(settings)
@@ -762,6 +776,8 @@ def calculate_month(
         else 0.0
     )
     dynamic_savings = round(dynamic_savings, 2)
+    if incomplete and automatic_savings_items:
+        dynamic_savings = 0.0
     effective_amounts = {
         item["id"]: money(item.get("amount", 0)) for item in items
     }
@@ -814,6 +830,7 @@ def calculate_month(
 
     return {
         "month": month_key,
+        "incomplete": incomplete,
         "account_balance": round(account_balance, 2),
         "expected_income": round(expected_income, 2),
         "unpaid_expenses": round(unpaid_expenses, 2),
@@ -904,6 +921,8 @@ def event_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
         summary = calculate_month(month, settings=data.get("settings"))
         for item in month.get("items", []):
             if item.get("status") == STATUS_SKIPPED or item.get("due_day") is None:
+                continue
+            if item.get("expense_type") == electricity.ELECTRICITY_TYPE and (item.get("electricity") or {}).get("status") == "missing":
                 continue
             events.append(
                 {
