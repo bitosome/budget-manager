@@ -66,6 +66,7 @@ class BudgetReminderCoordinator:
         self.manager = manager
         self._unsubscribe: Callable[[], None] | None = None
         self._sent: set[tuple[str, str]] = set()
+        self._plan_year: int | None = None
 
     def async_start(self) -> None:
         """Start checking assigned reminders every minute."""
@@ -83,6 +84,9 @@ class BudgetReminderCoordinator:
 
     async def _async_check(self, now: datetime) -> None:
         """Send each reminder once for the current scheduled minute."""
+        if self._plan_year != now.year:
+            await self.manager.async_ensure_plan_year(now.year)
+            self._plan_year = now.year
         minute_key = now.replace(second=0, microsecond=0).isoformat()
         today_prefix = now.date().isoformat()
         self._sent = {

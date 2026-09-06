@@ -130,6 +130,18 @@ assert.match(matrix, /data-action="edit-plan-name"/);
 assert.match(matrix, /data-original-name="Zulu"/);
 assert.match(matrix, /aria-label="Reorder Zulu"/);
 assert.match(matrix, /mdi:drag-horizontal-variant/);
+assert.match(matrix, /data-action="open-plan-month" data-month="2026-09"/);
+assert.doesNotMatch(matrix, /data-action="open-month"/);
+assert.doesNotMatch(panel._renderYear(), /class="month-(card|grid)"/);
+assert.match(panel._recurrenceLabel({ recurrence: "custom", recurrence_interval: 3 }), /every 3 months · no end date/);
+await panel._handleAction({ currentTarget: {
+  dataset: { action: "open-plan-month", month: "2026-09" },
+} });
+assert.equal(panel._month, "2026-09");
+panel._month = null;
+panel._matrixEditMode = false;
+assert.doesNotMatch(panel._renderYearMatrix(), /<td[^>]+data-action=/);
+panel._matrixEditMode = true;
 
 const renameCalls = [];
 const renamedPlanState = {

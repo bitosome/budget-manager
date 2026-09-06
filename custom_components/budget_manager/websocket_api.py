@@ -60,14 +60,15 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
         vol.Optional("year"): vol.Coerce(int),
     }
 )
-@callback
-def ws_get_state(
+@websocket_api.async_response
+async def ws_get_state(
     hass: HomeAssistant,
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
     """Return a complete selected-year snapshot."""
     try:
+        await _manager(hass).async_ensure_plan_year(msg.get("year"))
         connection.send_result(msg["id"], _manager(hass).snapshot(msg.get("year")))
     except BudgetValidationError as err:
         _error(connection, msg, err)

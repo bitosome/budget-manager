@@ -8,7 +8,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 
 ## Features
 
-- Full 12-month overview for any year.
+- Table-only plan view; select a month heading to open its budget (or create it if missing).
 - Grouped 24-month planning matrix showing the selected year followed by the next year, with explicit year headers.
 - A per-device **Hide past months** toggle shortens the plan table to the current month and future months without removing any budget data.
 - A visible toggle in the plan table's `Item` header pins or unpins the first column per device; mobile defaults to unpinned for easier horizontal scrolling.
@@ -21,7 +21,9 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Care-benefit planning can approximate the previous year's income from the linked hourly salary or use a user-entered previous-year social-taxable income total.
 - Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
 - Add, edit, and delete income, expenditures, and manual savings when automatic savings is disabled.
-- One-time, monthly, and yearly items.
+- One-time, monthly, yearly, or **Custom** recurrence (every N months), ending **Never** or on a chosen date.
+- Calendar-style save confirmation: change only this occurrence or this and following occurrences. Completed future payments are preserved; shared names still update across all months.
+- Manage categories in **Budget → Settings**; choose a category from a dropdown when editing an item.
 - Required end date for recurring items.
 - Edit/delete one occurrence or the current-and-future unpaid series.
 - Mark expenses paid and income received without automatically changing the manual account balance.
@@ -30,7 +32,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Create a blank month or copy any specific month.
 - Create a blank 12-month year or copy any specific year.
 - Reorder income and expenditure rows using Home Assistant-style drag handles in plan edit mode; the custom order is stored with the budget and included in JSON exports.
-- Renewal/special-month highlighting.
+- **Mark as renewal** highlighting, without a separate special-label field. Existing custom labels remain preserved.
 - Configurable budget-cycle end day (the 2nd of the following month by default).
 - Independently configurable per-day RAG colors (green from €45/day and yellow from €40/day by default).
 - Optional global automatic savings creates one dedicated Savings transfer in every month and calculates it without manual amounts. Savings remains separate from regular expenditures.
@@ -126,7 +128,11 @@ The cycle-end day, RAG colors, automatic-savings switch, and savings limits can 
 
 ## Import and export
 
-Open **Budget → Settings** to export or import a JSON file. An export contains all months, items, statuses, balances, cycle dates, and calculation settings. Import validates the file completely before replacing the current budget; an invalid file leaves existing data unchanged.
+Open **Budget → Settings** to export or import a JSON file. An export contains all months, items, statuses, balances, cycle dates, categories, recurrence rules, and calculation settings. Import validates the file completely before replacing the current budget; an invalid file leaves existing data unchanged.
+
+Recurrence with **Never** creates a rolling plan through the following year and extends automatically as later years are opened or the year changes. Occurrence-only edits and deletions remain exceptions, including after export/import. **Custom** repeats every 1–120 months, anchored to the starting month. When saving **This and following occurrences**, changed fields apply from the selected month onward; earlier amounts and completed payments are retained. Changing the recurrence schedule replaces only unpaid future occurrences.
+
+In **Budget → Settings → Categories**, add, rename, or remove categories. Renaming updates existing items and future recurrence templates. Removing a category leaves its items uncategorized; it does not delete expenditures.
 
 The portable format is identified by `"format": "budget-manager"` and a numeric `version`. Files should be treated as private because their contents may include household financial data.
 

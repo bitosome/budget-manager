@@ -347,7 +347,6 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _renderYear() {
-    const yearState = this._state.year;
     return `
       <section class="year-toolbar">
         <div class="year-switcher">
@@ -360,10 +359,6 @@ class BudgetManagerPanel extends HTMLElement {
       </section>
 
       ${!(this._state.available_months || []).length ? `<section class="empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings">Open settings</button>` : ""}</section>` : ""}
-
-      <section class="month-grid">
-        ${yearState.months.map((month) => this._renderMonthCard(month)).join("")}
-      </section>
 
       ${this._renderYearMatrix()}`;
   }
@@ -446,10 +441,6 @@ class BudgetManagerPanel extends HTMLElement {
       }
       return a.name.localeCompare(b.name);
     });
-    if (!ordered.length) {
-      if (this._showPastMonths) return "";
-      return `<section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">${sectionTitle}<div class="empty">No planned items in the visible months.</div></section>`;
-    }
     const renderGroup = (group) => {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
@@ -479,7 +470,7 @@ class BudgetManagerPanel extends HTMLElement {
             <colgroup><col class="item-column" style="width:${itemColumnWidth}px">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
               <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
-              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th>${this._esc(this._monthName(key, "short"))}</th>`).join("")}</tr>
+              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th><button type="button" class="month-heading-button" data-action="open-plan-month" data-month="${key}" aria-label="Open ${this._esc(this._monthLabel(key))}">${this._esc(this._monthName(key, "short"))}</button></th>`).join("")}</tr>
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
@@ -499,8 +490,7 @@ class BudgetManagerPanel extends HTMLElement {
     return `<tr class="summary-row ${tone}"><th>${label}</th>${months.map((monthKey) => {
       const summary = this._state.months[monthKey]?.summary;
       if (!summary) return `<td class="blank">—</td>`;
-      const navigation = this._matrixEditMode ? "" : ` data-action="open-month" data-month="${monthKey}"`;
-      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}"${navigation}>${this._money(summary[key])}</td>`;
+      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}">${this._money(summary[key])}</td>`;
     }).join("")}</tr>`;
   }
 
@@ -518,7 +508,7 @@ class BudgetManagerPanel extends HTMLElement {
     const complete = item.status === "paid" || item.status === "received";
     const effective = Number(item.effective_amount ?? item.amount);
     const adjusted = item.kind === "savings" && item.dynamic && !item.automatic_savings && effective !== Number(item.amount);
-    return `<td class="${item.special ? "special" : ""} ${complete ? "complete" : ""}" data-action="open-month" data-month="${monthKey}">
+    return `<td class="${item.special ? "special" : ""} ${complete ? "complete" : ""}">
       ${this._money(effective)}
       ${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}
       ${item.special ? `<small>${this._esc(item.special_label || "Renewal")}</small>` : ""}
@@ -603,7 +593,7 @@ class BudgetManagerPanel extends HTMLElement {
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.assignee_user_id ? ` · assigned to ${this._esc(this._assigneeName(item.assignee_user_id))} · reminders from ${this._esc(this._formatClockTime(item.reminder_time || "09:00"))}` : ""}
-          ${item.recurrence !== "single" ? ` · ${this._esc(item.recurrence)} until ${this._esc(this._formatDate(item.recurrence_end))}` : " · one-time"}
+          · ${this._recurrenceLabel(item)}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
           ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
@@ -652,6 +642,14 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "toggle-matrix-edit") { this._matrixEditMode = !this._matrixEditMode; return this._render(); }
     if (action === "drag-plan-row") return;
     if (action === "settings") return this._openSettings();
+    if (action === "open-plan-month") {
+      if (!this._state.months[button.dataset.month]) {
+        if (!this._canEdit) return this._showMessage("This month has not been created yet.");
+        return this._openCreateMonth(button.dataset.month);
+      }
+      this._month = button.dataset.month;
+      return this._render();
+    }
     if (action === "open-month") {
       if (this._matrixEditMode && button.closest(".matrix")) return;
       this._month = button.dataset.month;
@@ -907,6 +905,11 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
+    <fieldset class="settings-group"><legend>Categories</legend>
+      <p class="form-help">Rename a category to update its uses in all months. Removing a category leaves those items uncategorized.</p>
+      <div id="category-list">${(settings.categories || []).map((name) => this._categoryEditorRow(name)).join("")}</div>
+      <button type="button" class="quiet" id="add-category">＋ Add category</button>
+    </fieldset>
     <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="quiet" id="export-json">Export JSON</button><button type="button" class="quiet" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`;
     const modal = this._openModal("Budget settings", fields, "Save settings", async (form) => {
       const cycleEndDay = Number(form.get("cycle_end_day"));
@@ -920,6 +923,10 @@ class BudgetManagerPanel extends HTMLElement {
       await this._hass.callWS({
         type: "budget_manager/update_settings",
         changes: {
+          categories: [...modal.root.querySelectorAll('[name="category-name"]')].map((input) => input.value.trim()),
+          category_renames: Object.fromEntries([...modal.root.querySelectorAll('[name="category-name"]')]
+            .filter((input) => input.dataset.original && input.dataset.original !== input.value.trim())
+            .map((input) => [input.dataset.original, input.value.trim()])),
           cycle_end_day: cycleEndDay,
           daily_green_threshold: green,
           daily_yellow_threshold: yellow,
@@ -929,6 +936,15 @@ class BudgetManagerPanel extends HTMLElement {
         },
       });
     });
+    const categoryList = modal.root.querySelector("#category-list");
+    modal.root.querySelector("#add-category").onclick = () => {
+      categoryList.insertAdjacentHTML("beforeend", this._categoryEditorRow(""));
+      categoryList.lastElementChild.querySelector("input").focus();
+    };
+    categoryList.onclick = (event) => {
+      const button = event.target.closest('[data-remove-category]');
+      if (button) button.closest(".category-editor-row").remove();
+    };
     modal.root.querySelector("#export-json").onclick = () => this._exportData();
     const fileInput = modal.root.querySelector("#import-file");
     modal.root.querySelector("#import-json").onclick = () => fileInput.click();
@@ -936,6 +952,44 @@ class BudgetManagerPanel extends HTMLElement {
       if (fileInput.files?.[0]) await this._importData(fileInput.files[0], modal.close);
       fileInput.value = "";
     };
+  }
+
+  _categoryEditorRow(name) {
+    return `<div class="category-editor-row"><input name="category-name" aria-label="Category name" value="${this._esc(name)}" data-original="${this._esc(name)}" maxlength="100" required><button type="button" class="quiet" data-remove-category>Remove</button></div>`;
+  }
+
+  _recurrenceLabel(item) {
+    if (!item.recurrence || item.recurrence === "single") return "one-time";
+    const frequency = item.recurrence === "custom" ? `every ${item.recurrence_interval || 1} months` : item.recurrence === "yearly" ? "yearly" : "monthly";
+    return `${frequency} · ${item.recurrence_end ? `until ${this._esc(this._formatDate(item.recurrence_end))}` : "no end date"}`;
+  }
+
+  _chooseEditScope() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.className = "modal-backdrop scope-backdrop";
+      overlay.innerHTML = `<div class="modal scope-dialog" role="dialog" aria-modal="true" aria-label="Save changes"><div class="modal-head"><h2>Save changes</h2></div><div class="modal-body"><p>Where should these changes apply?</p><button type="button" class="quiet" data-scope="this">Only this occurrence</button><button type="button" class="primary" data-scope="future">This and following occurrences</button><p class="form-help">Completed future entries are preserved. Shared name changes apply to all months.</p></div><div class="modal-actions"><button type="button" class="quiet" data-scope="cancel">Back to editing</button></div></div>`;
+      const root = this.shadowRoot.getElementById("modal-root");
+      const form = root.querySelector("form");
+      const previousFocus = this.shadowRoot.activeElement;
+      form.inert = true;
+      const finish = (scope) => { overlay.remove(); form.inert = false; previousFocus?.focus(); resolve(scope); };
+      overlay.onclick = (event) => {
+        const choice = event.target.closest("[data-scope]")?.dataset.scope;
+        if (choice) finish(choice === "cancel" ? null : choice);
+      };
+      overlay.onkeydown = (event) => {
+        if (event.key === "Escape") { event.preventDefault(); finish(null); }
+        if (event.key === "Tab") {
+          const buttons = [...overlay.querySelectorAll("button")];
+          const index = buttons.indexOf(this.shadowRoot.activeElement);
+          event.preventDefault();
+          buttons[(index + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length].focus();
+        }
+      };
+      root.append(overlay);
+      overlay.querySelector("button").focus();
+    });
   }
 
   async _exportData() {
@@ -989,7 +1043,7 @@ class BudgetManagerPanel extends HTMLElement {
     root.querySelector("#modal-form").onsubmit = async (event) => {
       event.preventDefault();
       try {
-        await onSubmit(new FormData(event.currentTarget));
+        if (await onSubmit(new FormData(event.currentTarget)) === false) return;
         close();
         await this._load(this._year);
       } catch (err) {
@@ -1090,7 +1144,7 @@ class BudgetManagerPanel extends HTMLElement {
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
-      ${item && ["income", "expense"].includes(item.kind) ? `<p class="form-help">This name identifies a shared plan row. Changing it renames matching occurrences in every month; the edit scope below applies to the other fields.</p>` : ""}
+      ${item && ["income", "expense"].includes(item.kind) ? `<p class="form-help">Names are shared across all months. When you save a recurring item, you can choose which occurrences receive the other changes.</p>` : ""}
       <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
         <legend>Child-care sick leave</legend>
         ${careIncomeOptions.length ? `<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${careIncomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}">${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>` : `<div class="review-notice"><strong>No eligible income found</strong><span>Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month.</span></div>`}
@@ -1129,7 +1183,7 @@ class BudgetManagerPanel extends HTMLElement {
       <p class="form-help" id="dynamic-savings-help">The amount is the monthly savings plan. It is preserved inside the automatic savings range from Settings and adjusted outside that range. The transfer is frozen when marked paid.</p>
       <div class="two-col">
         ${this._field("Due day", "due_day", item?.due_day ?? "", "number", "min=1 max=31")}
-        ${this._field("Category", "category", item?.category ?? "")}
+        <label><span>Category</span><select name="category"><option value="">Uncategorized</option>${[...new Set([...(this._state.settings.categories || []), ...(item?.category ? [item.category] : [])])].map((name) => `<option value="${this._esc(name)}" ${item?.category === name ? "selected" : ""}>${this._esc(name)}</option>`).join("")}</select><small>Manage categories in Settings.</small></label>
       </div>
       <fieldset class="settings-group" id="assignment-settings">
         <legend>Assignment and reminders</legend>
@@ -1139,13 +1193,13 @@ class BudgetManagerPanel extends HTMLElement {
         </div>
         <p class="form-help">Only Home Assistant users with an active Mobile App notification device are listed. A notification is repeated hourly until the item is completed or the due day ends.</p>
       </fieldset>
-      <div class="two-col">
-        <label><span>Recurrence</span><select name="recurrence" id="recurrence"><option value="single" ${!item || item.recurrence === "single" ? "selected" : ""}>One-time</option><option value="monthly" ${item?.recurrence === "monthly" ? "selected" : ""}>Every month</option><option value="yearly" ${item?.recurrence === "yearly" ? "selected" : ""}>Every year</option></select></label>
-        ${this._field("Recurrence end", "recurrence_end", item?.recurrence_end || endDefault, "date", "")}
-      </div>
-      ${item?.series_id ? `<label><span>Edit scope</span><select name="scope"><option value="this">Only ${this._monthLabel(this._month)}</option><option value="future">This and future unpaid occurrences</option></select></label>` : ""}
-      <label class="check"><input type="checkbox" name="special" ${item?.special ? "checked" : ""}><span>Highlight as renewal / special month</span></label>
-      ${this._field("Special label", "special_label", item?.special_label || "Renewal")}
+      <fieldset class="settings-group" id="recurrence-settings"><legend>Repeat</legend><div class="two-col">
+        <label><span>Recurrence</span><select name="recurrence" id="recurrence"><option value="single" ${!item || item.recurrence === "single" ? "selected" : ""}>One-time</option><option value="monthly" ${item?.recurrence === "monthly" ? "selected" : ""}>Every month</option><option value="yearly" ${item?.recurrence === "yearly" ? "selected" : ""}>Every year</option><option value="custom" ${item?.recurrence === "custom" ? "selected" : ""}>Custom</option></select></label>
+        ${this._field("Repeat every (months)", "recurrence_interval", item?.recurrence_interval || 3, "number", "min=1 max=120 step=1")}
+        <label id="recurrence-end-mode"><span>Ends</span><select name="recurrence_end_mode"><option value="never" ${!item?.recurrence_end ? "selected" : ""}>Never</option><option value="date" ${item?.recurrence_end ? "selected" : ""}>On a date</option></select></label>
+        ${this._field("End date", "recurrence_end", item?.recurrence_end || endDefault, "date", "")}
+      </div></fieldset>
+      <label class="check"><input type="checkbox" name="special" ${item?.special ? "checked" : ""}><span>Mark as renewal</span></label>
       <label><span>Notes</span><textarea name="notes" rows="3">${this._esc(item?.notes || "")}</textarea></label>`;
     const extra = item ? `<button type="button" class="danger-button" id="delete-item">Delete</button>` : "";
     const modal = this._openModal(item ? "Edit item" : "Add item", fields, item ? "Save" : "Add", async (form) => {
@@ -1167,10 +1221,12 @@ class BudgetManagerPanel extends HTMLElement {
       const dueDay = isCareLeave ? null : (form.get("due_day") ? Number(form.get("due_day")) : null);
       if (assigneeUserId && !dueDay) throw new Error("Choose a due day for assigned reminders.");
       if (isCareLeave && basisMode === "actual_previous_year_income" && (!Number.isFinite(actualPreviousYearIncome) || actualPreviousYearIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
+      const scope = item && !isCareLeave ? await this._chooseEditScope() : "this";
+      if (!scope) return false;
       await this._hass.callWS({
         type: "budget_manager/upsert_item",
         month: this._month,
-        scope: form.get("scope") || "this",
+        scope,
         item: {
           ...(item || {}),
           name: form.get("name"), kind, amount: isCareLeave ? 0 : Number(form.get("amount")),
@@ -1178,7 +1234,8 @@ class BudgetManagerPanel extends HTMLElement {
           assignee_user_id: assigneeUserId || null,
           reminder_time: assigneeUserId ? String(form.get("reminder_time") || "09:00") : null,
           category: isCareLeave ? "Care leave" : form.get("category"), recurrence: isCareLeave ? "single" : recurrence,
-          recurrence_end: isCareLeave || recurrence === "single" ? null : form.get("recurrence_end"),
+          recurrence_interval: recurrence === "custom" ? Number(form.get("recurrence_interval")) : 1,
+          recurrence_end: isCareLeave || recurrence === "single" || form.get("recurrence_end_mode") === "never" ? null : form.get("recurrence_end"),
           expense_type: isCareLeave ? "child_care_leave" : "standard",
           care_leave: isCareLeave ? {
             linked_income_item_id: careLink[1],
@@ -1209,13 +1266,27 @@ class BudgetManagerPanel extends HTMLElement {
           } : null,
           dynamic: !isCareLeave && form.has("dynamic"),
           needs_review: false,
-          special: !isCareLeave && form.has("special"), special_label: form.get("special_label"), notes: form.get("notes"),
+          special: !isCareLeave && form.has("special"), special_label: item?.special_label || "Renewal", notes: form.get("notes"),
         },
       });
     }, extra);
     const recurrenceSelect = modal.root.querySelector("#recurrence");
     const endInput = modal.root.querySelector('[name="recurrence_end"]');
-    const updateEnd = () => { endInput.disabled = recurrenceSelect.value === "single"; endInput.required = recurrenceSelect.value !== "single"; };
+    const endMode = modal.root.querySelector('[name="recurrence_end_mode"]');
+    const intervalInput = modal.root.querySelector('[name="recurrence_interval"]');
+    const updateEnd = () => {
+      const repeating = recurrenceSelect.value !== "single";
+      const custom = recurrenceSelect.value === "custom";
+      intervalInput.closest("label").hidden = !custom;
+      intervalInput.disabled = !custom;
+      intervalInput.required = custom;
+      endMode.closest("label").hidden = !repeating;
+      endMode.disabled = !repeating;
+      endInput.disabled = !repeating || endMode.value === "never";
+      endInput.required = !endInput.disabled;
+      endInput.closest("label").hidden = endInput.disabled;
+    };
+    endMode.onchange = updateEnd;
     recurrenceSelect.onchange = updateEnd;
     updateEnd();
     const kindSelect = modal.root.querySelector("#item-kind");
@@ -1322,10 +1393,9 @@ class BudgetManagerPanel extends HTMLElement {
       assignmentSettings.querySelectorAll("input,select").forEach((control) => { control.disabled = careVisible; });
       careLeaveSection.querySelectorAll("input,select").forEach((control) => { control.disabled = !careVisible; });
       if (careIncomeLink) careIncomeLink.required = careVisible;
-      recurrenceSelect.closest(".two-col").hidden = careVisible;
+      modal.root.querySelector("#recurrence-settings").hidden = careVisible;
       modal.root.querySelector('[name="due_day"]').closest(".two-col").hidden = careVisible;
       modal.root.querySelector('[name="special"]').closest("label").hidden = careVisible;
-      modal.root.querySelector('[name="special_label"]').closest("label").hidden = careVisible;
       if (careVisible) {
         recurrenceSelect.value = "single";
         if (amountInput.dataset.careDisabled !== "true") amountInput.dataset.previousValue = amountInput.value;
@@ -1575,6 +1645,11 @@ class BudgetManagerPanel extends HTMLElement {
       .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { overflow:auto; max-height:70vh; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-row-label.editing { display:flex; flex:1 1 auto; align-items:center; overflow:visible; }.plan-row-label.editing .kind-dot { flex:0 0 7px; }.plan-name-input { width:100%; min-width:0; padding:6px 7px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); font-size:11px; font-weight:650; }.plan-name-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.plan-name-input:disabled { opacity:.55; cursor:progress; }.plan-drag-handle { display:inline-flex; flex:0 0 32px; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:var(--ha-border-radius-button,8px); background:transparent; color:var(--secondary-text-color,var(--muted)); cursor:grab; touch-action:none; -webkit-user-select:none; user-select:none; }.plan-drag-handle:hover,.plan-drag-handle:focus-visible,.plan-drag-handle.active { color:var(--primary-color,var(--green)); background:color-mix(in srgb,var(--primary-color,var(--green)) 12%,transparent); outline:none; }.plan-drag-handle:active,.plan-drag-handle.active { cursor:grabbing; }.plan-drag-handle ha-icon { --mdc-icon-size:22px; pointer-events:none; }.plan-sort-chosen,.plan-sort-drag,.plan-sort-fallback { -webkit-user-select:none !important; user-select:none !important; cursor:grabbing; }.plan-sort-chosen th,.plan-sort-chosen td { background:color-mix(in srgb,var(--primary-color,var(--green)) 16%,var(--surface)) !important; box-shadow:inset 0 2px 0 var(--primary-color,var(--green)),inset 0 -2px 0 var(--primary-color,var(--green)); }.plan-sort-ghost { opacity:.35; }.plan-sort-drag,.plan-sort-fallback { opacity:1 !important; background:var(--card-background-color,var(--surface)); box-shadow:0 4px 8px 3px #00000026; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
       .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-title { font-weight:680; }.item-meta { color:var(--muted); font-size:11px; margin-top:4px; }.item-amount { font-size:16px; text-align:right; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.more-button { width:34px; height:34px; border-radius:9px; background:transparent; color:var(--muted); }.more-button:hover { background:var(--line); }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
       .form-help { color:var(--muted); line-height:1.55; }
+      .month-heading-button { background:transparent; color:var(--ink); font-weight:750; padding:7px 3px; width:100%; text-decoration:underline; text-underline-offset:4px; }
+      .matrix td { cursor:default; }.matrix td:hover { outline:none; }
+      .month-heading-button:hover { color:var(--primary-color,var(--green)); }
+      .scope-backdrop { z-index:1100; }.scope-dialog { max-width:460px; }.scope-dialog .modal-body { display:grid; gap:16px; }
+      .category-editor-row { display:flex; align-items:center; gap:10px; margin:10px 0; }.category-editor-row input { min-width:0; flex:1; }
       .balance-value { display:block; }
       .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { min-height:0; padding:20px; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:disabled { color:var(--muted); opacity:.72; cursor:not-allowed; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
       .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }.care-periods { min-width:0; overflow:visible; border:1px solid var(--line); border-radius:14px; }.care-periods-head,.care-period { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:13px 15px; }.care-periods-head { background:var(--page); border-radius:13px 13px 0 0; }.care-periods-head > div,.care-period > div:first-child { min-width:0; display:grid; gap:4px; }.care-periods-head span,.care-period span { color:var(--muted); font-size:11px; line-height:1.4; }.care-period-count { display:inline-flex; align-items:center; justify-content:center; min-width:20px; min-height:20px; margin-left:5px; padding:1px 6px; border-radius:999px; background:var(--line); color:var(--ink) !important; font-size:10px !important; }.care-period-list { display:flex; min-width:0; flex-direction:column; }.care-period { flex:0 0 auto; border-top:1px solid var(--line); }.care-period-actions,.inline-actions { display:flex; flex:0 0 auto; justify-content:flex-end; gap:8px; }.care-period-actions .danger-button { padding:8px 10px; }.care-benefit-total { color:var(--blue); }

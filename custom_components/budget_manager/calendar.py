@@ -56,6 +56,7 @@ class BudgetCalendar(BudgetEntity, CalendarEntity):
         end_date: datetime,
     ) -> list[CalendarEvent]:
         """Return occurrences overlapping the requested range."""
+        await self.manager.async_ensure_plan_year(min(end_date.year, 2199))
         start = start_date.date()
         end = end_date.date()
         return [

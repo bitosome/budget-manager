@@ -488,18 +488,16 @@ class BudgetModelTests(unittest.TestCase):
         )
         self.assertEqual(months, ["2026-11", "2027-11", "2028-11", "2029-11"])
 
-    def test_recurring_item_requires_end_date(self) -> None:
-        with self.assertRaisesRegex(
-            model.BudgetValidationError, "require an end date"
-        ):
-            model.normalize_item(
-                {
-                    "name": "Subscription",
-                    "kind": "expense",
-                    "amount": 10,
-                    "recurrence": "monthly",
-                }
-            )
+    def test_custom_recurrence_and_never(self) -> None:
+        item = model.normalize_item({"name": "Quarterly", "amount": 10,
+                                     "recurrence": "custom", "recurrence_interval": 3})
+        self.assertIsNone(item["recurrence_end"])
+        self.assertEqual(model.iter_recurrence_months("2026-09", "custom", None, 3,
+                         through="2027-09"),
+                         ["2026-09", "2026-12", "2027-03", "2027-06", "2027-09"])
+        for interval in (0, -1, 1.5, 121, True):
+            with self.assertRaises(model.BudgetValidationError):
+                model.normalize_item({**item, "recurrence_interval": interval})
 
     def test_review_flag_defaults_false_and_can_be_imported(self) -> None:
         normal = model.normalize_item(
@@ -768,6 +766,9 @@ class BudgetReminderTests(unittest.IsolatedAsyncioTestCase):
         services = FakeServices()
         hass = types.SimpleNamespace(services=services)
         manager = types.SimpleNamespace(data=data)
+        async def ensure_year(_year):
+            pass
+        manager.async_ensure_plan_year = ensure_year
         coordinator = notification_module.BudgetReminderCoordinator(hass, manager)
         original_targets = notification_module.mobile_notify_targets
         notification_module.mobile_notify_targets = (
@@ -820,6 +821,113 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len({item["series_id"] for item in occurrences}), 1)
         self.assertEqual(len({item["id"] for item in occurrences}), 3)
+
+    async def test_never_extends_and_keeps_single_edits_and_deletions(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {
+            "name": "Quarterly", "amount": 10, "recurrence": "custom", "recurrence_interval": 3})
+        sep = self.manager.data["months"]["2026-09"]["items"][0]
+        await self.manager.async_upsert_item("2026-09", {**sep, "amount": 25})
+        dec = self.manager.data["months"]["2026-12"]["items"][0]
+        await self.manager.async_delete_item("2026-12", dec["id"])
+        exported = self.manager.export_data()
+        await self.manager.async_import_data(exported)
+        await self.manager.async_ensure_plan_year(2028)
+        self.assertEqual(self.manager.data["months"]["2026-09"]["items"][0]["amount"], 25)
+        self.assertEqual(self.manager.data["months"]["2026-12"]["items"], [])
+        self.assertEqual(self.manager.data["months"]["2028-03"]["items"][0]["amount"], 10)
+        self.assertNotIn("2028-02", self.manager.data["months"])
+
+    async def test_future_edit_preserves_ids_paid_entries_and_changes_schedule(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {
+            "name": "Bill", "amount": 10, "recurrence": "monthly"})
+        oct_item = self.manager.data["months"]["2026-10"]["items"][0]
+        nov = self.manager.data["months"]["2026-11"]["items"][0]
+        nov["status"] = "paid"
+        oct_id = oct_item["id"]
+        await self.manager.async_upsert_item("2026-10", {**oct_item, "amount": 20,
+            "recurrence": "custom", "recurrence_interval": 3, "recurrence_end": "2027-05-01"}, scope="future")
+        self.assertEqual(self.manager.data["months"]["2026-10"]["items"][0]["id"], oct_id)
+        self.assertEqual(self.manager.data["months"]["2026-11"]["items"][0]["amount"], 10)
+        self.assertEqual(self.manager.data["months"]["2026-12"]["items"], [])
+        self.assertEqual(self.manager.data["months"]["2027-01"]["items"][0]["amount"], 20)
+        await self.manager.async_ensure_plan_year(2029)
+        self.assertNotIn("2029-01", self.manager.data["months"])
+
+    async def test_invalid_future_edit_is_atomic(self):
+        from copy import deepcopy
+        await self.manager.async_upsert_item("2026-09", {
+            "name": "Bill", "amount": 10, "recurrence": "monthly", "recurrence_end": "2026-12-01"})
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        before = deepcopy(self.manager.data)
+        with self.assertRaises(model.BudgetValidationError):
+            await self.manager.async_upsert_item("2026-09", {**item, "recurrence_end": "2025-01-01"}, scope="future")
+        self.assertEqual(self.manager.data, before)
+
+    async def test_future_delete_stops_never_after_reload(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10, "recurrence": "monthly"})
+        item = self.manager.data["months"]["2026-10"]["items"][0]
+        await self.manager.async_delete_item("2026-10", item["id"], scope="future")
+        await self.manager.async_import_data(self.manager.export_data())
+        await self.manager.async_ensure_plan_year(2028)
+        self.assertEqual(self.manager.data["months"]["2026-10"]["items"], [])
+        self.assertNotIn("2028-01", self.manager.data["months"])
+
+    async def test_categories_rename_remove_and_export_with_recurrence(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10,
+            "category": "Home", "recurrence": "monthly"})
+        await self.manager.async_update_settings({"categories": ["Housing", "Transport"],
+                                                 "category_renames": {"Home": "Housing"}})
+        await self.manager.async_import_data(self.manager.export_data())
+        await self.manager.async_ensure_plan_year(2028)
+        self.assertEqual(self.manager.data["months"]["2028-01"]["items"][0]["category"], "Housing")
+        await self.manager.async_update_settings({"categories": ["Transport"]})
+        self.assertTrue(all(item["category"] == "" for item in self.manager._all_items_and_templates()))
+
+    async def test_future_edit_shared_single_copies(self):
+        for key in ("2026-09", "2026-10"):
+            self.manager.data["months"][key] = model.make_month(key)
+            await self.manager.async_upsert_item(key, {"name": "Bill", "amount": 10})
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        await self.manager.async_upsert_item("2026-09", {**item, "amount": 20}, scope="future")
+        self.assertEqual(self.manager.data["months"]["2026-10"]["items"][0]["amount"], 20)
+
+    async def test_future_edit_keeps_monthly_amount_overrides(self):
+        await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10,
+            "recurrence": "monthly", "recurrence_end": "2026-12-01"})
+        october = self.manager.data["months"]["2026-10"]["items"][0]
+        await self.manager.async_upsert_item("2026-10", {**october, "amount": 25})
+        september = self.manager.data["months"]["2026-09"]["items"][0]
+        await self.manager.async_upsert_item("2026-09", {**september, "due_day": 5}, scope="future")
+        october = self.manager.data["months"]["2026-10"]["items"][0]
+        self.assertEqual(october["amount"], 25)
+        self.assertEqual(october["due_day"], 5)
+
+    async def test_converting_single_to_recurrence_preserves_current_id(self):
+        item = await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10})
+        await self.manager.async_upsert_item("2026-09", {**item, "recurrence": "monthly",
+            "recurrence_end": "2026-12-01"})
+        self.assertEqual(self.manager.data["months"]["2026-09"]["items"][0]["id"], item["id"])
+
+    async def test_never_name_rename_reaches_new_year(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10,
+            "recurrence": "monthly"})
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        await self.manager.async_upsert_item("2026-09", {**item, "name": "Utilities"})
+        await self.manager.async_ensure_plan_year(2028)
+        self.assertEqual(self.manager.data["months"]["2028-01"]["items"][0]["name"], "Utilities")
+
+    async def test_copy_never_year_does_not_duplicate_future_occurrences(self):
+        self.manager.today = lambda: date(2026, 9, 6)
+        await self.manager.async_upsert_item("2026-09", {"name": "Bill", "amount": 10,
+            "recurrence": "monthly"})
+        await self.manager.async_create_year(2028, source_year=2027)
+        await self.manager.async_ensure_plan_year(2029)
+        self.assertEqual(len(self.manager.data["months"]["2029-01"]["items"]), 1)
 
     async def test_plan_item_order_is_persistent_and_preserves_hidden_rows(self) -> None:
         september = self.manager.data["months"]["2026-09"]

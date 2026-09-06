@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -58,6 +59,7 @@ from .model import (
     money,
     new_id,
     normalize_item,
+    normalize_categories,
     normalize_cycle_end_day,
     normalize_import_document,
     normalize_plan_item_order,
@@ -107,6 +109,7 @@ class BudgetManager:
         except BudgetValidationError:
             settings["plan_item_order"] = {KIND_INCOME: [], KIND_EXPENSE: []}
         self._data.setdefault("months", {})
+        self._data.setdefault("recurrence_rules", {})
         for month_key, month in self._data["months"].items():
             month.pop("note", None)
             month["payday"] = default_payday(month_key, cycle_end_day)
@@ -145,7 +148,10 @@ class BudgetManager:
             "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
         ):
             self._ensure_automatic_savings_for_all_months()
-        self._data["schema_version"] = 11
+        self._data["schema_version"] = 12
+        self._sync_categories()
+        self._discover_open_recurrences()
+        await self._extend_open_recurrences(f"{self.today().year + 1}-12")
         await self._async_rebuild_all_care_leave_effects()
         await self._store.async_save(self._data)
 
@@ -162,6 +168,16 @@ class BudgetManager:
         await self._store.async_save(self._data)
         for listener in tuple(self._listeners):
             listener()
+
+    @asynccontextmanager
+    async def _transaction(self):
+        async with self._lock:
+            previous = deepcopy(self._data)
+            try:
+                yield
+            except Exception:
+                self._data = previous
+                raise
 
     def snapshot(self, year: int | None = None) -> dict[str, Any]:
         """Return panel-ready state and calculations."""
@@ -314,6 +330,9 @@ class BudgetManager:
             previous = self._data
             self._data = imported
             try:
+                self._sync_categories()
+                self._discover_open_recurrences()
+                await self._extend_open_recurrences(f"{self.today().year + 1}-12")
                 if self._data["settings"].get("automatic_savings_enabled", False):
                     self._ensure_automatic_savings_for_all_months()
                 await self._async_rebuild_all_care_leave_effects()
@@ -372,6 +391,19 @@ class BudgetManager:
                 "Automatic savings setting must be true or false"
             )
         async with self._lock:
+            if "categories" in changes:
+                categories = normalize_categories(changes["categories"])
+                renames = changes.get("category_renames", {})
+                if not isinstance(renames, dict):
+                    raise BudgetValidationError("Invalid category renames")
+                old_categories = set(settings.get("categories", []))
+                if any(old not in old_categories or new not in categories
+                       for old, new in renames.items()):
+                    raise BudgetValidationError("Unknown category rename")
+                for item in self._all_items_and_templates():
+                    category = renames.get(item.get("category"), item.get("category"))
+                    item["category"] = category if category in categories else ""
+                settings["categories"] = categories
             was_automatic = settings.get(
                 "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
             )
@@ -388,6 +420,78 @@ class BudgetManager:
             for month_key, month in self._data["months"].items():
                 month["payday"] = default_payday(month_key, cycle_end_day)
             await self._async_commit()
+
+    def _all_items_and_templates(self):
+        for month in self._data["months"].values():
+            yield from month.get("items", [])
+        for rule in self._data.get("recurrence_rules", {}).values():
+            yield rule["template"]
+
+    def _sync_categories(self) -> None:
+        categories = list(self._data["settings"].get("categories", []))
+        canonical = {name.casefold(): name for name in categories}
+        for item in self._all_items_and_templates():
+            name = str(item.get("category") or "").strip()
+            if name and name.casefold() not in canonical:
+                categories.append(name)
+                canonical[name.casefold()] = name
+            if name:
+                item["category"] = canonical[name.casefold()]
+        self._data["settings"]["categories"] = categories
+
+    def _recurrence_horizon(self, start: str) -> str:
+        return max(f"{min(2200, max(self.today().year, int(start[:4])) + 1)}-12",
+                   max(self._data["months"], default=start))
+
+    def _discover_open_recurrences(self) -> None:
+        """Register imported/copied never-ending series once, preserving exceptions."""
+        grouped = {}
+        rules = self._data.setdefault("recurrence_rules", {})
+        for key, month in sorted(self._data["months"].items()):
+            for item in month["items"]:
+                series = item.get("series_id")
+                if series and not item.get("recurrence_end") and series not in rules:
+                    if series not in grouped:
+                        grouped[series] = {"template": deepcopy(item), "start": key, "through": key}
+                    grouped[series]["through"] = key
+        rules.update(grouped)
+
+    async def _extend_open_recurrences(self, through: str) -> bool:
+        validate_month_key(through)
+        changed = False
+        for series, rule in self._data.get("recurrence_rules", {}).items():
+            if through <= rule["through"]:
+                continue
+            template = rule["template"]
+            for target in iter_recurrence_months(
+                rule["start"], template["recurrence"], None,
+                template.get("recurrence_interval", 1), through=through,
+            ):
+                if target <= rule["through"]:
+                    continue
+                month = self._data["months"].setdefault(target, make_month(
+                    target, cycle_end_day=self._data["settings"]["cycle_end_day"]))
+                if any(item.get("series_id") == series or
+                       self._is_shared_plan_item(item, template["kind"], template["name"])
+                       for item in month["items"]):
+                    continue
+                occurrence = normalize_item(await self._async_prepare_calculated_income(
+                    {**deepcopy(template), "id": new_id(), "status": STATUS_PENDING,
+                     "paid_at": None, "needs_review": False}, target))
+                month["items"].append(occurrence)
+            rule["through"] = through
+            changed = True
+        if changed and self._data["settings"].get("automatic_savings_enabled"):
+            self._ensure_automatic_savings_for_all_months()
+        return changed
+
+    async def async_ensure_plan_year(self, year: int | None = None) -> None:
+        year = year or self.today().year
+        if not 2000 <= year <= 2199:
+            raise BudgetValidationError("Plan year must be between 2000 and 2199")
+        async with self._transaction():
+            if await self._extend_open_recurrences(f"{year + 1}-12"):
+                await self._async_commit()
 
     async def async_update_plan_item_order(
         self, kind: str, ordered_names: list[str]
@@ -512,6 +616,10 @@ class BudgetManager:
                     ):
                         care_leave["linked_income_name"] = new_name
 
+        for rule in self._data.get("recurrence_rules", {}).values():
+            if self._is_shared_plan_item(rule["template"], kind, old_name):
+                rule["template"]["name"] = new_name
+
         plan_order = normalize_plan_item_order(
             self._data["settings"].get("plan_item_order")
         )
@@ -583,6 +691,8 @@ class BudgetManager:
             if self._data["settings"].get("automatic_savings_enabled", False):
                 self._ensure_automatic_savings_for_month(month)
             self._data["months"][target] = month
+            self._discover_open_recurrences()
+            await self._extend_open_recurrences(self._recurrence_horizon(target))
             await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return self._month_payload(month)
@@ -634,6 +744,8 @@ class BudgetManager:
                     )
             if self._data["settings"].get("automatic_savings_enabled", False):
                 self._ensure_automatic_savings_for_all_months()
+            self._discover_open_recurrences()
+            await self._extend_open_recurrences(f"{int(target_year)}-12")
             await self._async_rebuild_all_care_leave_effects()
             await self._async_commit()
             return calculate_year(
@@ -677,7 +789,7 @@ class BudgetManager:
         validate_month_key(month_key)
         if scope not in {"this", "future"}:
             raise BudgetValidationError("Scope must be this or future")
-        async with self._lock:
+        async with self._transaction():
             month = self._require_month(month_key)
             raw_id = str(raw.get("id") or "")
             existing = next(
@@ -706,11 +818,17 @@ class BudgetManager:
                     "Turn off automatic savings before managing savings manually"
                 )
 
-            future_series_id = (
-                existing.get("series_id")
-                if existing and scope == "future" and existing.get("series_id")
-                else None
-            )
+            future_series_id = (existing.get("series_id") or new_id()) if existing and scope == "future" else None
+            future_items = {}
+            if future_series_id:
+                for key, stored_month in self._data["months"].items():
+                    if key >= month_key:
+                        candidates = [item for item in stored_month["items"]
+                            if item.get("series_id") == future_series_id or
+                            self._is_shared_plan_item(item, existing["kind"], existing["name"])]
+                        if len(candidates) > 1:
+                            raise BudgetValidationError(f"Multiple matching occurrences in {key}; edit them individually")
+                        future_items[key] = candidates[0] if candidates else None
             merged = {**(existing or {}), **raw}
             if future_series_id:
                 merged["series_id"] = future_series_id
@@ -719,10 +837,27 @@ class BudgetManager:
                 existing_id=existing["id"] if existing else None,
             )
             self._validate_care_leave_item(normalized)
+            changed_fields = {
+                key: deepcopy(value) for key, value in normalized.items()
+                if not existing or value != existing.get(key)
+                if key not in {"id", "series_id", "status", "paid_at"}
+            }
+            horizon = self._recurrence_horizon(month_key)
+            targets = ([month_key] if normalized["recurrence"] == RECURRENCE_SINGLE
+                       else iter_recurrence_months(month_key, normalized["recurrence"],
+                           normalized["recurrence_end"], normalized["recurrence_interval"],
+                           through=horizon))
+            if future_series_id and existing["recurrence"] == RECURRENCE_SINGLE and normalized["recurrence"] == RECURRENCE_SINGLE:
+                targets = sorted(key for key, item in future_items.items() if item)
+            if future_series_id:
+                for key, candidate in future_items.items():
+                    if candidate and key not in targets and candidate["status"] == STATUS_PENDING:
+                        self._assert_income_not_linked_to_care_leave(candidate, key)
 
             if (
                 existing
                 and existing.get("kind") == normalized.get("kind")
+                and normalized["kind"] in {KIND_INCOME, KIND_EXPENSE}
                 and str(existing.get("name", "")).strip() != normalized["name"]
                 and existing.get("expense_type") != CARE_LEAVE_TYPE
                 and existing.get("generated_type") != GENERATED_BENEFIT_TYPE
@@ -732,6 +867,16 @@ class BudgetManager:
                 )
 
             if future_series_id:
+                series_to_stop = {candidate["series_id"] for candidate in future_items.values()
+                                  if candidate and candidate.get("series_id")}
+                for series in series_to_stop:
+                    self._data.setdefault("recurrence_rules", {}).pop(series, None)
+                # Old history must not seed the discontinued open-ended rule again.
+                end_previous = (date.fromisoformat(f"{month_key}-01") - timedelta(days=1)).isoformat()
+                for stored_month in self._data["months"].values():
+                    for item in stored_month["items"]:
+                        if item.get("series_id") in series_to_stop and not item.get("recurrence_end"):
+                            item["recurrence_end"] = end_previous
                 for key, stored_month in self._data["months"].items():
                     if key < month_key:
                         continue
@@ -739,32 +884,43 @@ class BudgetManager:
                         item
                         for item in stored_month["items"]
                         if not (
-                            item.get("series_id") == future_series_id
+                            item is future_items.get(key)
                             and item.get("status", STATUS_PENDING) == STATUS_PENDING
                         )
                     ]
-                normalized["series_id"] = future_series_id
+                # The new segment gets its own rule, leaving earlier occurrences intact.
+                normalized["series_id"] = new_id() if normalized["recurrence"] != RECURRENCE_SINGLE else None
                 existing = None
                 raw_id = ""
 
-            if existing:
+            if existing and (existing.get("series_id") or normalized["recurrence"] == RECURRENCE_SINGLE):
                 index = month["items"].index(existing)
                 month["items"][index] = normalized
+                self._sync_categories()
                 await self._async_rebuild_all_care_leave_effects()
                 await self._async_commit()
                 return deepcopy(normalized)
 
+            if existing:
+                month["items"].remove(existing)
+
             if normalized["recurrence"] == RECURRENCE_SINGLE:
-                normalized["id"] = raw_id or new_id()
-                month["items"].append(normalized)
+                for target in targets:
+                    candidate = future_items.get(target)
+                    if not candidate or candidate["status"] == STATUS_PENDING:
+                        occurrence = normalize_item(await self._async_prepare_calculated_income(
+                            {**(deepcopy(candidate) if candidate else deepcopy(normalized)),
+                             **changed_fields, "id": candidate["id"] if candidate else raw_id or new_id()}, target))
+                        self._data["months"][target]["items"].append(occurrence)
+                        if target == month_key:
+                            normalized = occurrence
             else:
-                months = iter_recurrence_months(
-                    month_key,
-                    normalized["recurrence"],
-                    normalized["recurrence_end"],
-                )
+                months = targets
                 series_id = normalized.get("series_id") or new_id()
                 for target in months:
+                    candidate = future_items.get(target)
+                    if candidate and candidate["status"] != STATUS_PENDING:
+                        continue
                     target_month = self._data["months"].setdefault(
                         target,
                         make_month(
@@ -776,15 +932,23 @@ class BudgetManager:
                     )
                     occurrence = normalize_item(
                         await self._async_prepare_calculated_income(
-                            deepcopy(normalized), target
+                            {**(deepcopy(candidate) if candidate else deepcopy(normalized)),
+                             **changed_fields, "recurrence": normalized["recurrence"],
+                             "recurrence_interval": normalized["recurrence_interval"],
+                             "recurrence_end": normalized["recurrence_end"]}, target
                         )
                     )
-                    occurrence["id"] = new_id()
+                    occurrence["id"] = candidate["id"] if candidate else (raw_id if target == month_key and raw_id else new_id())
                     occurrence["series_id"] = series_id
                     occurrence["status"] = STATUS_PENDING
                     occurrence["paid_at"] = None
                     target_month["items"].append(occurrence)
                 normalized["series_id"] = series_id
+                if not normalized["recurrence_end"]:
+                    self._data.setdefault("recurrence_rules", {})[series_id] = {
+                        "template": deepcopy(normalized), "start": month_key, "through": horizon,
+                    }
+            self._sync_categories()
             if self._data["settings"].get("automatic_savings_enabled", False):
                 self._ensure_automatic_savings_for_all_months()
             await self._async_rebuild_all_care_leave_effects()
@@ -1292,6 +1456,18 @@ class BudgetManager:
                 )
             if scope == "future" and item.get("series_id"):
                 series_id = item["series_id"]
+                # Validate the whole deletion before changing any occurrence.
+                for key, stored_month in self._data["months"].items():
+                    if key >= month_key:
+                        for candidate in stored_month["items"]:
+                            if candidate.get("series_id") == series_id and candidate["status"] == STATUS_PENDING:
+                                self._assert_income_not_linked_to_care_leave(candidate, key)
+                self._data.setdefault("recurrence_rules", {}).pop(series_id, None)
+                end_previous = (date.fromisoformat(f"{month_key}-01") - timedelta(days=1)).isoformat()
+                for stored_month in self._data["months"].values():
+                    for candidate in stored_month["items"]:
+                        if candidate.get("series_id") == series_id:
+                            candidate["recurrence_end"] = end_previous
                 for key, stored_month in self._data["months"].items():
                     if key < month_key:
                         continue

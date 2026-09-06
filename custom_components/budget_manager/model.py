@@ -141,7 +141,7 @@ def shift_period_date(source_month: str, target_month: str, value: str | None) -
 def empty_data() -> dict[str, Any]:
     """Return a new empty storage document."""
     return {
-        "schema_version": 11,
+        "schema_version": 12,
         "settings": {
             "currency": DEFAULT_CURRENCY,
             "locale": DEFAULT_LOCALE,
@@ -153,8 +153,10 @@ def empty_data() -> dict[str, Any]:
             "savings_floor_threshold": DEFAULT_SAVINGS_FLOOR_THRESHOLD,
             "automatic_savings_enabled": DEFAULT_AUTOMATIC_SAVINGS_ENABLED,
             "plan_item_order": {KIND_INCOME: [], KIND_EXPENSE: []},
+            "categories": [],
         },
         "months": {},
+        "recurrence_rules": {},
     }
 
 
@@ -214,11 +216,18 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
 
     recurrence = str(raw.get("recurrence", RECURRENCE_SINGLE))
     if recurrence not in VALID_RECURRENCES:
-        raise BudgetValidationError("Recurrence must be single, monthly, or yearly")
+        raise BudgetValidationError("Recurrence must be single, monthly, yearly, or custom")
+    interval = raw.get("recurrence_interval", 1)
+    try:
+        if isinstance(interval, bool) or int(interval) != float(interval):
+            raise ValueError
+        interval = int(interval)
+    except (TypeError, ValueError) as err:
+        raise BudgetValidationError("Repeat interval must be a whole number") from err
+    if not 1 <= interval <= 120:
+        raise BudgetValidationError("Repeat interval must be between 1 and 120 months")
     recurrence_end = raw.get("recurrence_end")
-    if recurrence != RECURRENCE_SINGLE:
-        if not recurrence_end:
-            raise BudgetValidationError("Recurring items require an end date")
+    if recurrence != RECURRENCE_SINGLE and recurrence_end:
         try:
             recurrence_end_date = date.fromisoformat(str(recurrence_end))
         except ValueError as err:
@@ -293,6 +302,7 @@ def normalize_item(raw: dict[str, Any], *, existing_id: str | None = None) -> di
         if recurrence != RECURRENCE_SINGLE
         else None,
         "recurrence": recurrence,
+        "recurrence_interval": interval if recurrence == "custom" else 1,
         "recurrence_end": recurrence_end,
         "needs_review": bool(raw.get("needs_review", False)),
         "income_calculation": income_calculation,
@@ -346,14 +356,15 @@ def copy_month_data(
 
 
 def iter_recurrence_months(
-    start_month: str, recurrence: str, recurrence_end: str
+    start_month: str, recurrence: str, recurrence_end: str | None,
+    interval: int = 1, *, through: str | None = None,
 ) -> list[str]:
     """Return inclusive month keys for a bounded recurrence."""
     validate_month_key(start_month)
     if recurrence not in VALID_RECURRENCES - {RECURRENCE_SINGLE}:
         raise BudgetValidationError("A recurring frequency is required")
     try:
-        end_date = date.fromisoformat(recurrence_end)
+        end_date = date.fromisoformat(recurrence_end or f"{through}-01")
     except ValueError as err:
         raise BudgetValidationError("Recurrence end must be an ISO date") from err
     end_month = end_date.strftime("%Y-%m")
@@ -364,7 +375,9 @@ def iter_recurrence_months(
     end_year, end_month_number = month_parts(end_month)
     start_index = start_year * 12 + start_month_number - 1
     end_index = end_year * 12 + end_month_number - 1
-    step = 1 if recurrence == "monthly" else 12
+    step = interval if recurrence == "custom" else 1 if recurrence == "monthly" else 12
+    if not isinstance(step, int) or not 1 <= step <= 120:
+        raise BudgetValidationError("Invalid recurrence interval")
     result: list[str] = []
     for index in range(start_index, end_index + 1, step):
         year, zero_month = divmod(index, 12)
@@ -451,11 +464,27 @@ def normalize_plan_item_order(value: Any) -> dict[str, list[str]]:
     return result
 
 
+def normalize_categories(value: Any) -> list[str]:
+    """Validate the selectable category names."""
+    if not isinstance(value, list) or len(value) > 500:
+        raise BudgetValidationError("Categories must be a list of at most 500 names")
+    result = []
+    for raw in value:
+        name = str(raw).strip()
+        if not name or len(name) > 100:
+            raise BudgetValidationError("Category names must contain 1–100 characters")
+        if name.casefold() in {entry.casefold() for entry in result}:
+            raise BudgetValidationError("Category names must be unique")
+        result.append(name)
+    return result
+
+
 def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
     """Return a portable, versioned Budget Manager JSON document."""
     defaults = empty_data()["settings"]
     settings = data.get("settings", {})
     portable_settings = {
+        "categories": normalize_categories(settings.get("categories", [])),
         "currency": str(settings.get("currency", defaults["currency"])),
         "locale": str(settings.get("locale", defaults["locale"])),
         "cycle_end_day": normalize_cycle_end_day(
@@ -505,6 +534,7 @@ def export_data_document(data: dict[str, Any]) -> dict[str, Any]:
         "version": EXPORT_VERSION,
         "settings": portable_settings,
         "months": months,
+        "recurrence_rules": deepcopy(data.get("recurrence_rules", {})),
     }
 
 
@@ -549,6 +579,9 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
     if len(raw_months) > 2400:
         raise BudgetValidationError("Import cannot contain more than 2400 months")
     result = empty_data()
+    result["settings"]["categories"] = normalize_categories(
+        raw_settings.get("categories", [])
+    )
     result["settings"].update(
         {
             "currency": currency,
@@ -603,6 +636,22 @@ def normalize_import_document(document: dict[str, Any]) -> dict[str, Any]:
             seen_item_ids.add(item["id"])
             month["items"].append(item)
         result["months"][month_key] = month
+    rules = document.get("recurrence_rules", {})
+    if not isinstance(rules, dict) or len(rules) > 10000:
+        raise BudgetValidationError("Invalid recurrence rules")
+    for series_id, rule in rules.items():
+        if not isinstance(rule, dict):
+            raise BudgetValidationError("Invalid recurrence rule")
+        template = normalize_item(rule.get("template"))
+        if template["series_id"] != series_id or template["recurrence_end"]:
+            raise BudgetValidationError("Invalid open-ended recurrence rule")
+        start = validate_month_key(rule.get("start", ""))
+        through = validate_month_key(rule.get("through", ""))
+        if through < start:
+            raise BudgetValidationError("Recurrence horizon precedes its start")
+        result["recurrence_rules"][series_id] = {
+            "template": template, "start": start, "through": through,
+        }
     return result
 
 
