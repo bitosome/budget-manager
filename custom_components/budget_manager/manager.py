@@ -7,6 +7,9 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
+from time import perf_counter
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -444,14 +447,33 @@ class BudgetManager:
         for rule in self._data.get("recurrence_rules", {}).values():
             yield rule["template"]
 
-    def _rebuild_electricity(self):
+    def _train_electricity(self, *, force=False, trigger="automatic"):
         state = self._data.setdefault("electricity", electricity.empty_state())
         settings = self._data["settings"].setdefault("electricity", electricity.normalize_settings())
         history = electricity.combined_history(state)
         current = self.today().strftime("%Y-%m")
-        if settings["learning_enabled"] or not state.get("model"):
+        inputs = {"history": history, "month": current,
+            **{key: settings[key] for key in ("method", "history_months", "half_life_months")}}
+        fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+        if force or ((settings["learning_enabled"] or not state.get("model"))
+            and state.get("training", {}).get("input_hash") != fingerprint):
+            started = datetime.now(timezone.utc).isoformat()
+            timer = perf_counter()
             state["model"] = electricity.train(history, settings, current)
             state["diagnostics"] = electricity.backtest(history, settings)
+            samples = state["model"]["samples"]
+            state["training"] = {"status": "trained" if samples else "no_data",
+                "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": round((perf_counter() - timer) * 1000, 2),
+                "samples": samples, "trigger": trigger, "input_hash": fingerprint,
+                "message": f"Training completed using {samples} completed months" if samples else
+                    "No usable training months. Save cost/consumption sources and refresh statistics, or import completed bill history. Disabled months, zero consumption and months outside the history window are excluded."}
+
+    def _rebuild_electricity(self):
+        self._train_electricity()
+        state = self._data["electricity"]
+        settings = self._data["settings"]["electricity"]
+        history = electricity.combined_history(state)
         for key, month in self._data["months"].items():
             for item in month["items"]:
                 if item.get("expense_type") != electricity.ELECTRICITY_TYPE or item["status"] != STATUS_PENDING:
@@ -465,7 +487,14 @@ class BudgetManager:
         from .electricity_source import async_read_statistics
         async with self._electricity_refresh_lock:
             settings = deepcopy(self._data["settings"].get("electricity", electricity.normalize_settings()))
+            started = datetime.now(timezone.utc).isoformat()
+            timer = perf_counter()
             if not settings["cost_statistic_id"] or not settings["energy_statistic_id"]:
+                async with self._lock:
+                    state = self._data.setdefault("electricity", electricity.empty_state())
+                    state["warning"] = "No statistics loaded: select and save both accumulated grid-cost (EUR) and consumption (kWh) sources in Electricity settings."
+                    state["refresh"] = {"status": "not_configured", "finished_at": started, "message": state["warning"], "months": 0}
+                    await self._async_commit()
                 return
             try:
                 observations, live, warning = await async_read_statistics(self.hass, settings, full=full)
@@ -475,6 +504,8 @@ class BudgetManager:
                     state = self._data.setdefault("electricity", electricity.empty_state())
                     state["warning"] = "Electricity statistics are unavailable; retaining the last data"
                     state["live"] = {}
+                    state["refresh"] = {"status": "error", "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "duration_ms": round((perf_counter() - timer) * 1000, 2), "message": state["warning"], "months": 0}
                     await self._async_commit()
                 return
             async with self._lock:
@@ -484,12 +515,15 @@ class BudgetManager:
                 state["observations"].update(observations)
                 state["live"] = live
                 state["warning"] = warning
+                state["refresh"] = {"status": "warning" if warning else "complete",
+                    "finished_at": datetime.now(timezone.utc).isoformat(), "duration_ms": round((perf_counter() - timer) * 1000, 2),
+                    "months": len(observations), "message": f"Read {len(observations)} complete measured months." + (f" {warning}" if warning else "")}
                 await self._async_commit()
 
     async def async_electricity_action(self, action, document=None):
         if action == "refresh":
             await self.async_refresh_electricity(full=True)
-            return
+            return deepcopy(self._data["electricity"])
         async with self._transaction():
             state = self._data.setdefault("electricity", electricity.empty_state())
             settings = self._data["settings"]["electricity"]
@@ -507,15 +541,17 @@ class BudgetManager:
                 state["ignored_months"] = sorted((set(state.get("ignored_months", []))
                     | set(state.get("observations", {}))) - set(rows))
             elif action == "retrain":
-                state["model"] = electricity.train(electricity.combined_history(state), settings, self.today().strftime("%Y-%m"))
-                state["diagnostics"] = electricity.backtest(electricity.combined_history(state), settings)
+                self._train_electricity(force=True, trigger="manual")
             elif action == "reset":
                 settings["learning_enabled"] = False
                 state["model"] = {"samples": 0, "method": settings["method"], "trained_through": None}
                 state["diagnostics"] = {}
+                state["training"] = {"status": "reset", "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "samples": 0, "message": "Model reset. Automatic learning is paused; history is retained. Retrain now or enable learning to fit a model again."}
             else:
                 raise BudgetValidationError("Unknown electricity action")
             await self._async_commit()
+            return deepcopy(state)
 
     def _sync_categories(self) -> None:
         categories = list(self._data["settings"].get("categories", []))

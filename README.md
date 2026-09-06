@@ -139,6 +139,8 @@ Electricity history, settings and model inputs are included in the full budget e
 
 Invoice history is private household data. No personal invoices, pretrained household model or Gmail credentials are distributed with the integration. Reviewing bills in Gmail is a separate data-preparation step; the installed integration does not access Gmail.
 
+Training controls report the actual completion time, elapsed milliseconds, sample count and last statistics-refresh result without closing the settings dialog. The local model is small and may legitimately finish in milliseconds. Empty history, missing source selections and Recorder failures are shown explicitly. Controls use **saved** settings, and unrelated budget edits do not retrain an unchanged model.
+
 ## Home Assistant entities
 
 - `sensor.budget_manager_daily_allowance`

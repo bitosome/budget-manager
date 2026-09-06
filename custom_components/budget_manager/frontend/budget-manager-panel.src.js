@@ -974,10 +974,47 @@ class BudgetManagerPanel extends HTMLElement {
     return `<div class="electricity-fee settings-group">${this._field("Fee name", "fee-name", fee.name || "", "text", "required")}${this._field("Monthly amount including VAT, EUR", "fee-amount", fee.amount ?? "", "number", "min=0 step=0.01 required")}<div class="two-col">${this._field("From consumption month (optional)", "fee-from", fee.from_month || "", "month")}${this._field("Through consumption month (optional)", "fee-to", fee.to_month || "", "month")}</div><button type="button" class="danger-button" data-remove-fee>Remove fee</button></div>`;
   }
 
+  _electricityStatusHtml(state = {}) {
+    const model = state.model || {}, training = state.training || {}, refresh = state.refresh || {};
+    const date = value => value ? this._formatDateTime(value) : "Never";
+    const duration = value => value == null ? "" : ` · ${Number(value).toLocaleString(this._localeLanguage(), {maximumFractionDigits:2})} ms`;
+    return `<p><strong>${this._esc(training.message || (model.samples ? "Model available" : "Not trained — no usable history loaded"))}</strong></p>
+      <p>${model.samples || 0} training months${model.trained_through ? ` · through ${this._monthLabel(model.trained_through)}` : ""}</p>
+      <p class="form-help">Last training attempt: ${date(training.finished_at)}${duration(training.duration_ms)}. This small local model can finish training in milliseconds.</p>
+      <p class="form-help">Walk-forward error (before buffer): ${state.diagnostics?.mae_eur != null ? `${this._money(state.diagnostics.mae_eur)} mean absolute error across ${state.diagnostics.evaluated_months} months` : "not enough earlier months to evaluate"}. Historical performance does not guarantee future prices.</p>
+      <p class="form-help">Last statistics refresh: ${date(refresh.finished_at)}${duration(refresh.duration_ms)}${refresh.message ? ` · ${this._esc(refresh.message)}` : ""}</p>
+      ${state.warning && state.warning !== refresh.message ? `<p class="form-help">${this._esc(state.warning)}</p>` : ""}`;
+  }
+
+  async _runElectricityAction(modal, action) {
+    const status = modal.root.querySelector('#electricity-action-status');
+    const buttons = [...modal.root.querySelectorAll('[data-electricity-action], button[type="submit"], #electricity-history')];
+    status.textContent = action === "retrain" ? "Training on saved history…" : action === "refresh" ? "Reading Recorder statistics…" : "Resetting model…";
+    status.setAttribute('aria-busy', 'true');
+    buttons.forEach(button => button.disabled = true);
+    try {
+      const result = await this._hass.callWS({type:"budget_manager/electricity",action});
+      if (!result.electricity) throw new Error("Restart Home Assistant after updating Budget Manager to enable detailed training status.");
+      this._state.electricity = result.electricity;
+      const details = action === "refresh" ? result.electricity.refresh : result.electricity.training;
+      status.textContent = details?.message || "Completed";
+      modal.root.querySelector('#electricity-model-status').innerHTML = this._electricityStatusHtml(result.electricity);
+      if (action === "reset") {
+        modal.root.querySelector('[name="learning_enabled"]').checked = false;
+        this._state.settings.electricity.learning_enabled = false;
+      }
+      // Only the status region changes: preserve the form, focus and scroll position.
+    } catch (err) {
+      status.textContent = `Failed: ${err?.message || String(err)}`;
+    } finally {
+      status.setAttribute('aria-busy', 'false');
+      buttons.forEach(button => button.disabled = false);
+    }
+  }
+
   _openElectricitySettings() {
     const config = this._state.settings.electricity || {};
     const state = this._state.electricity || {};
-    const model = state.model || {};
     const sensorField = (label, name, unit) => {
       const candidates = Object.entries(this._hass.states || {}).filter(([id, s]) => id.startsWith("sensor.") && unit.includes(s.attributes?.unit_of_measurement));
       return `<label><span>${label}</span><input name="${name}" list="${name}-options" value="${this._esc(config[name] || "")}" placeholder="sensor.…"><datalist id="${name}-options">${candidates.map(([id, s]) => `<option value="${this._esc(id)}">${this._esc(s.attributes.friendly_name || id)}</option>`).join("")}</datalist></label>`;
@@ -993,7 +1030,7 @@ class BudgetManagerPanel extends HTMLElement {
       <p class="form-help">Pausing learning freezes the fitted model; measured costs continue updating. The model runs locally without a cloud AI service. Price adaptation uses recent consumption-weighted costs, not one volatile hourly price.</p>
       <div class="two-col">${this._field("Buffer on unmeasured costs, %", "buffer_percent", config.buffer_percent ?? 15, "number", "min=0 max=200 step=1 required")}${this._field("Recent-price weight, %", "live_price_weight", config.live_price_weight ?? 50, "number", "min=0 max=100 step=1 required")}${this._field("History window, months", "history_months", config.history_months ?? 36, "number", "min=3 max=60 step=1 required")}${this._field("Learning half-life, months", "half_life_months", config.half_life_months ?? 6, "number", "min=1 max=36 step=1 required")}</div>
       <p class="form-help">Fallback values are used before sufficient data is available. Leave both at zero to show Needs data instead of inventing an estimate.</p><div class="two-col">${this._field("Fallback monthly consumption, kWh", "fallback_monthly_kwh", config.fallback_monthly_kwh ?? 0, "number", "min=0 max=100000 step=0.01 required")}${this._field("Fallback variable price, EUR/kWh", "fallback_price", config.fallback_price ?? 0, "number", "min=0 max=10 step=0.00001 required")}</div></fieldset>
-      <fieldset class="settings-group"><legend>Model status</legend><p>${model.samples || 0} training months · ${model.trained_through ? `through ${this._monthLabel(model.trained_through)}` : "not trained"}</p><p class="form-help">Walk-forward error (before buffer): ${state.diagnostics?.mae_eur != null ? `${this._money(state.diagnostics.mae_eur)} mean absolute error across ${state.diagnostics.evaluated_months} months` : "not enough earlier months to evaluate"}. Historical performance does not guarantee future prices.</p>${state.warning ? `<p class="form-help">${this._esc(state.warning)}</p>` : ""}<div class="data-actions"><button type="button" class="quiet" id="electricity-history">Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p class="form-help">Save settings before using these controls. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
+      <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="quiet" id="electricity-history">Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
     const modal = this._openModal("Electricity settings", fields, "Save settings", async form => {
       const electricity = {...config};
       for (const key of ["cost_statistic_id", "energy_statistic_id", "price_entity_id", "method"]) electricity[key] = String(form.get(key) || "").trim();
@@ -1006,11 +1043,15 @@ class BudgetManagerPanel extends HTMLElement {
     modal.root.querySelector("#add-electricity-fee").onclick = () => modal.root.querySelector("#electricity-fees").insertAdjacentHTML("beforeend",this._electricityFeeRow());
     modal.root.querySelector("#electricity-fees").onclick = event => event.target.closest('[data-remove-fee]')?.closest('.electricity-fee').remove();
     modal.root.querySelector("#electricity-history").onclick = () => this._openElectricityHistory();
+    const closeSettings = () => { modal.close(); this._load(this._year); };
+    modal.root.querySelector('#modal-close').onclick = closeSettings;
+    modal.root.querySelector('#modal-cancel').onclick = closeSettings;
+    modal.root.querySelector('.modal-backdrop').onclick = event => {
+      if (event.target.classList.contains('modal-backdrop')) closeSettings();
+    };
     modal.root.querySelectorAll('[data-electricity-action]').forEach(button => button.onclick = async () => {
       if (button.dataset.electricityAction === "reset" && !window.confirm("Reset the learned model and pause learning? Historical bills are retained.")) return;
-      button.disabled = true;
-      try { await this._hass.callWS({type:"budget_manager/electricity",action:button.dataset.electricityAction}); modal.close(); await this._load(); this._openElectricitySettings(); }
-      catch(err) { this._showError(err); button.disabled = false; }
+      await this._runElectricityAction(modal, button.dataset.electricityAction);
     });
   }
 

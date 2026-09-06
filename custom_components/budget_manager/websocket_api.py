@@ -62,8 +62,8 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
 @websocket_api.async_response
 async def ws_electricity(hass, connection, msg):
     try:
-        await _manager(hass).async_electricity_action(msg["action"], msg.get("document"))
-        connection.send_result(msg["id"], {"success": True})
+        state = await _manager(hass).async_electricity_action(msg["action"], msg.get("document"))
+        connection.send_result(msg["id"], {"success": True, "electricity": state})
     except (BudgetValidationError, ValueError) as err:
         _error(connection, msg, err)
 

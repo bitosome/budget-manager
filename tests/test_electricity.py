@@ -169,5 +169,34 @@ class ElectricityManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_electricity_action("history", {"format":electricity.HISTORY_FORMAT,"version":1,"records":[{"month":"2026-08","kwh":1000,"grid_cost":210}]})
         self.assertEqual(electricity.combined_history(state)["2026-08"]["grid_cost"], 210)
 
+    async def test_training_status_is_real_and_unrelated_commits_do_not_retrain(self):
+        empty = await self.manager.async_electricity_action("retrain")
+        self.assertEqual(empty["training"]["status"], "no_data")
+        self.assertEqual(empty["training"]["samples"], 0)
+        self.assertIn("No usable", empty["training"]["message"])
+        self.assertIsNotNone(empty["training"]["finished_at"])
+        self.assertGreaterEqual(empty["training"]["duration_ms"], 0)
+        await self.manager.async_electricity_action("history", {"format":electricity.HISTORY_FORMAT,"version":1,"records":[{"month":"2026-08","kwh":1000,"grid_cost":210}]})
+        trained = deepcopy(self.manager.data["electricity"]["training"])
+        self.assertEqual(trained["status"], "trained")
+        self.assertEqual(trained["samples"], 1)
+        await self.manager._async_commit()
+        self.assertEqual(self.manager.data["electricity"]["training"], trained)
+        reset = await self.manager.async_electricity_action("reset")
+        self.assertEqual(reset["training"]["status"], "reset")
+
+    async def test_refresh_reports_missing_sources_and_recorder_errors(self):
+        result = await self.manager.async_electricity_action("refresh")
+        self.assertEqual(result["refresh"]["status"], "not_configured")
+        self.assertIn("sources", result["refresh"]["message"])
+        self.manager.data["settings"]["electricity"].update(cost_statistic_id="sensor.cost",energy_statistic_id="sensor.energy")
+        with patch.object(source, "async_read_statistics", side_effect=RuntimeError("unavailable")):
+            failed = await self.manager.async_electricity_action("refresh")
+        self.assertEqual(failed["refresh"]["status"], "error")
+        with patch.object(source, "async_read_statistics", return_value=({}, {}, "No complete paired hours")):
+            warning = await self.manager.async_electricity_action("refresh")
+        self.assertEqual(warning["refresh"]["status"], "warning")
+        self.assertIn("No complete paired hours", warning["refresh"]["message"])
+
 
 if __name__ == "__main__": unittest.main()

@@ -229,3 +229,17 @@ const electricCell = panel._matrixCell({months:{"2026-09":electricItem}},electri
 assert.match(electricCell, /Measured/);
 assert.doesNotMatch(electricCell, /<input|data-action=/);
 assert.doesNotMatch(panel._matrixCell({months:{"2026-09":electricItem}},null,"2026-10"), /<input/);
+
+const actionStatus = {textContent:"",setAttribute:()=>{}}, modelStatus = {innerHTML:""};
+const actionButtons = [{disabled:false},{disabled:false}];
+const actionModal = {root:{querySelector:selector=>selector==='#electricity-action-status'?actionStatus:modelStatus,querySelectorAll:()=>actionButtons},close:()=>assert.fail("Training must not close the dialog")};
+panel._load=()=>assert.fail("Training must not reload/scroll the page");
+panel._hass.callWS=async()=>({electricity:{model:{samples:3},training:{status:"trained",samples:3,message:"Training completed using 3 completed months",finished_at:"2026-09-06T14:00:00Z",duration_ms:1.25}}});
+await panel._runElectricityAction(actionModal,"retrain");
+assert.match(actionStatus.textContent,/3 completed months/);
+assert.match(modelStatus.innerHTML,/1.25 ms/);
+assert.ok(actionButtons.every(button=>!button.disabled));
+panel._hass.callWS=async()=>{throw new Error("Recorder unavailable")};
+await panel._runElectricityAction(actionModal,"refresh");
+assert.equal(actionStatus.textContent,"Failed: Recorder unavailable");
+assert.ok(actionButtons.every(button=>!button.disabled));
