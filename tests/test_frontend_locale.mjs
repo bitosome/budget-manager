@@ -221,10 +221,16 @@ const styles = panel._styles();
 assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);
 assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);
-assert.match(styles, /\.matrix-group \.matrix-group-heading\s*\{[^}]*position:sticky/);
+assert.match(styles, /\.matrix-group-label\s*\{[^}]*position:relative[^}]*translateX\(var\(--matrix-scroll-x,0px\)\)/);
 assert.match(styles, /\.matrix-section\s*\{[^}]*width:calc\(100% \+ 24px\)/);
 assert.match(styles, /\.item-main\s*\{[^}]*grid-column:2; grid-row:1/);
 assert.doesNotMatch(styles, /\.more-button/);
+const matrixScrollStyles = [];
+panel._syncMatrixGroupLabels({
+  scrollLeft: 234,
+  style: {setProperty: (name, value) => matrixScrollStyles.push([name, value])},
+});
+assert.deepEqual(matrixScrollStyles, [["--matrix-scroll-x", "234px"]]);
 
 const electricItem = {id:"electric", name:"Electricity",kind:"expense",expense_type:"electricity",amount:120,status:"pending",electricity:{status:"measured",consumption_month:"2026-08"}};
 assert.equal(panel._itemHasMonthlyValue({...electricItem, amount:0}), true);

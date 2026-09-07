@@ -446,7 +446,7 @@ class BudgetManagerPanel extends HTMLElement {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
       const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
-      return `<tr class="matrix-group ${group.kind}"><th class="matrix-group-heading"><span class="kind-dot"></span>${group.label}</th><td colspan="${months.length}" aria-hidden="true"></td></tr>${groupRows.map((row) => {
+      return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="matrix-group-label"><span class="kind-dot"></span>${group.label}</span></th></tr>${groupRows.map((row) => {
         const orderIndex = reorderable.indexOf(row);
         const editableName = this._matrixEditMode && orderIndex >= 0;
         const controls = editableName
@@ -475,7 +475,7 @@ class BudgetManagerPanel extends HTMLElement {
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
-              <tr class="matrix-group summary"><th class="matrix-group-heading">Plan overview</th><td colspan="${months.length}" aria-hidden="true"></td></tr>
+              <tr class="matrix-group summary"><th colspan="${months.length + 1}"><span class="matrix-group-label">Plan overview</span></th></tr>
               ${this._matrixSummaryRow("Expected income", months, "expected_income")}
               ${this._matrixSummaryRow("Open expenses", months, "unpaid_expenses")}
               ${this._matrixSummaryRow("Open savings", months, "planned_savings", "savings")}
@@ -647,7 +647,17 @@ class BudgetManagerPanel extends HTMLElement {
         if (event.key === "Escape") { event.currentTarget.value = event.currentTarget.dataset.originalName; event.currentTarget.blur(); }
       });
     });
+    const matrixWrap = this.shadowRoot.querySelector(".matrix-wrap");
+    if (matrixWrap) {
+      const syncGroupLabels = () => this._syncMatrixGroupLabels(matrixWrap);
+      matrixWrap.addEventListener("scroll", syncGroupLabels, { passive: true });
+      syncGroupLabels();
+    }
     this._initPlanSortable();
+  }
+
+  _syncMatrixGroupLabels(matrixWrap) {
+    matrixWrap.style.setProperty("--matrix-scroll-x", `${matrixWrap.scrollLeft}px`);
   }
 
   async _handleAction(event) {
@@ -1894,10 +1904,10 @@ class BudgetManagerPanel extends HTMLElement {
       #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }.review-notice.care-estimate-notice { border-color:color-mix(in srgb,var(--blue) 62%,var(--line)); background:color-mix(in srgb,var(--blue) 13%,var(--surface)); color:var(--ink); }.review-notice.care-estimate-notice span { color:var(--muted); }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
-      .matrix-group td { padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group .matrix-group-heading { position:sticky !important; left:0; z-index:2; overflow:visible; }.matrix-group.summary td { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
       @media (max-width:700px) { h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) 40px; column-gap:10px; row-gap:8px; align-items:start; padding:14px 12px; }.status-button,.status-placeholder { grid-column:1; grid-row:1 / span 2; }.item-main { grid-column:2; grid-row:1; }.edit-button { grid-column:3; grid-row:1; justify-self:end; width:40px; height:40px; }.item-amount { grid-column:2 / span 2; grid-row:2; justify-self:end; align-self:end; }.matrix-section { width:calc(100% + 24px); margin-left:-12px; margin-right:-12px; border-left:0; border-right:0; border-radius:0; }.matrix-section > .section-title { padding-left:18px; padding-right:18px; }.matrix-group-label { left:8px; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
       @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; } }
+      .matrix-group-label { position:relative; left:auto; transform:translateX(var(--matrix-scroll-x,0px)); will-change:transform; }
     `;
   }
 }
