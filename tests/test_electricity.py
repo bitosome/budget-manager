@@ -2,6 +2,9 @@
 from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 import importlib
+import sys
+from types import ModuleType, SimpleNamespace
+from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -101,12 +104,113 @@ class ElectricityTests(unittest.TestCase):
             self.assertNotIn("2026-03",observations)
 
 
+class RecorderReaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reader_uses_stored_units_and_supports_legacy_metadata(self):
+        tz = ZoneInfo("Europe/Tallinn")
+        now = datetime(2026, 9, 1, tzinfo=tz)
+        start = datetime(2026, 8, 1, tzinfo=tz)
+        rows = [{"start": start.timestamp() + i * 3600, "change": 1} for i in range(744)]
+        settings = electricity.normalize_settings({"cost_statistic_id": "sensor.cost", "energy_statistic_id": "sensor.energy"})
+        for unit_field in ("statistics_unit_of_measurement", "unit_of_measurement"):
+            with self.subTest(unit_field=unit_field):
+                metadata = [{"statistic_id": "sensor.cost", unit_field: "EUR", "display_unit_of_measurement": "USD", "has_sum": True},
+                    {"statistic_id": "sensor.energy", unit_field: "kWh", "display_unit_of_measurement": "Wh", "has_sum": True}]
+                calls = []
+                def list_ids(hass, statistic_ids=None, statistic_type=None):
+                    if statistic_ids is not None and statistic_type is not None:
+                        raise ValueError("Providing statistic_type is mutually exclusive of statistic_ids")
+                    self.assertEqual(statistic_ids, {"sensor.cost", "sensor.energy"})
+                    return metadata
+                def statistics(*args): return {"sensor.cost": rows, "sensor.energy": rows}
+                async def executor(fn, *args):
+                    calls.append(fn)
+                    return fn(*args)
+                recorder = ModuleType("homeassistant.components.recorder")
+                recorder.get_instance = lambda hass: SimpleNamespace(async_add_executor_job=executor)
+                stats = ModuleType("homeassistant.components.recorder.statistics")
+                stats.list_statistic_ids = list_ids
+                stats.statistics_during_period = statistics
+                with ExitStack() as stack:
+                    stack.enter_context(patch.dict(sys.modules, {recorder.__name__:recorder, stats.__name__:stats}))
+                    for name, value in {"now":lambda:now,"as_local":lambda dt:dt.astimezone(tz),"as_utc":lambda dt:dt.astimezone(timezone.utc),"UTC":timezone.utc}.items():
+                        stack.enter_context(patch.object(source.dt_util, name, value, create=True))
+                    observations, _, _ = await source.async_read_statistics(object(), settings, full=True)
+                    self.assertEqual(observations["2026-08"]["grid_cost"], 744)
+                    self.assertEqual(calls, [list_ids, statistics])
+                    calls.clear()
+                    metadata[1]["has_sum"] = False
+                    rejected, _, warning = await source.async_read_statistics(object(), settings, full=True)
+                    self.assertEqual(rejected, {})
+                    self.assertIn("sum statistics", warning)
+                    self.assertEqual(calls, [list_ids])
+
+
 class ElectricityManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.manager=support.manager_module.BudgetManager(object(),"electricity-test")
         self.manager.today=lambda:date(2026,9,6)
         self.manager.data["months"]["2026-09"]=support.model.make_month("2026-09")
         self.manager.data["settings"]["electricity"]=electricity.normalize_settings({"fallback_monthly_kwh":1000,"fallback_price":.2,"buffer_percent":10})
+
+    async def test_record_bill_reconciles_without_payment_or_duplicate_fees(self):
+        await self.manager.async_upsert_item("2026-09", {"name":"Electricity", "expense_type":"electricity", "amount":0})
+        state = self.manager.data["electricity"]
+        state["history"] = electricity.normalize_history([{"month":"2026-07", "kwh":900, "grid_cost":180}])
+        state["observations"] = electricity.normalize_history([{"month":"2026-08", "kwh":1000, "grid_cost":200, "source":"recorder"}])
+        state["ignored_months"] = ["2026-08"]
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        settings = deepcopy(self.manager.data["settings"])
+        balance = self.manager.data["months"]["2026-09"]["account_balance"]
+        bill = {"payment_month":"2026-09", "item_id":item["id"], "total":223.45, "kwh":1010, "fixed_fees":26.96}
+        result = await self.manager.async_electricity_action("bill", bill)
+        self.assertEqual(item["amount"], 223.45)
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["electricity"]["status"], "actual")
+        self.assertEqual(item["electricity"]["buffer"], 0)
+        self.assertEqual(result["history"]["2026-08"]["grid_cost"], 196.49)
+        self.assertEqual(result["history"]["2026-07"]["grid_cost"], 180)
+        self.assertEqual(result["model"]["samples"], 2)
+        self.assertEqual(result["ignored_months"], [])
+        self.assertEqual(self.manager.data["settings"], settings)
+        self.assertEqual(self.manager.data["months"]["2026-09"]["account_balance"], balance)
+        # Repeated corrections update one month, including after a Recorder refresh.
+        await self.manager.async_electricity_action("bill", {**bill,"total":225})
+        self.assertEqual(len(self.manager.data["electricity"]["history"]), 2)
+        self.assertEqual(item["amount"], 225)
+        self.manager.data["electricity"]["observations"]["2026-08"]["grid_cost"] = 201
+        await self.manager._async_commit()
+        self.assertEqual(item["amount"], 225)
+
+    async def test_bill_validation_is_atomic_and_paid_items_are_protected(self):
+        await self.manager.async_upsert_item("2026-09", {"name":"Electricity", "expense_type":"electricity", "amount":0, "recurrence":"monthly", "recurrence_end":"2026-12-31"})
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        bill = {"payment_month":"2026-09", "item_id":item["id"], "total":123, "kwh":500, "fixed_fees":12}
+        for changes in ({"total":-1}, {"kwh":float("nan")}, {"enabled":"yes"}, {"fixed_fees":None}, {"item_id":"missing"}):
+            before = deepcopy(self.manager.data)
+            with self.assertRaises(support.model.BudgetValidationError):
+                await self.manager.async_electricity_action("bill", {**bill, **changes})
+            self.assertEqual(self.manager.data, before)
+        future = self.manager.data["months"]["2026-10"]["items"][0]
+        with self.assertRaisesRegex(support.model.BudgetValidationError, "month has ended"):
+            await self.manager.async_electricity_action("bill", {**bill,"payment_month":"2026-10","item_id":future["id"]})
+        await self.manager.async_set_item_status("2026-09",item["id"],"paid")
+        with self.assertRaisesRegex(support.model.BudgetValidationError, "Reopen"):
+            await self.manager.async_electricity_action("bill", bill)
+
+    async def test_bill_respects_learning_pause_and_exclusion(self):
+        await self.manager.async_upsert_item("2026-09", {"name":"Electricity", "expense_type":"electricity", "amount":0})
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        bill = {"payment_month":"2026-09", "item_id":item["id"], "total":123, "kwh":500, "fixed_fees":12}
+        await self.manager.async_electricity_action("bill", bill)
+        model = deepcopy(self.manager.data["electricity"]["model"])
+        self.manager.data["settings"]["electricity"]["learning_enabled"] = False
+        await self.manager.async_electricity_action("bill", {**bill, "total":200})
+        self.assertEqual(self.manager.data["electricity"]["model"], model)
+        self.assertEqual(item["amount"], 200)
+        self.manager.data["settings"]["electricity"]["learning_enabled"] = True
+        await self.manager.async_electricity_action("bill", {**bill, "enabled":False})
+        self.assertEqual(self.manager.data["electricity"]["model"]["samples"], 0)
+        self.assertEqual(item["amount"], 123)
 
     async def test_smart_recurrence_paid_freeze_and_export(self):
         await self.manager.async_upsert_item("2026-09",{"name":"Electricity","expense_type":"electricity","amount":999,"recurrence":"monthly","recurrence_end":"2026-12-31"})
@@ -190,7 +294,7 @@ class ElectricityManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["refresh"]["status"], "not_configured")
         self.assertIn("sources", result["refresh"]["message"])
         self.manager.data["settings"]["electricity"].update(cost_statistic_id="sensor.cost",energy_statistic_id="sensor.energy")
-        with patch.object(source, "async_read_statistics", side_effect=RuntimeError("unavailable")):
+        with self.assertLogs(support.manager_module._LOGGER, level="ERROR"), patch.object(source, "async_read_statistics", side_effect=RuntimeError("unavailable")):
             failed = await self.manager.async_electricity_action("refresh")
         self.assertEqual(failed["refresh"]["status"], "error")
         with patch.object(source, "async_read_statistics", return_value=({}, {}, "No complete paired hours")):

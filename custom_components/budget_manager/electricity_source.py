@@ -55,8 +55,13 @@ async def async_read_statistics(hass, settings, *, full=False):
     cost, energy = settings["cost_statistic_id"], settings["energy_statistic_id"]
     if not cost or not energy:
         return {}, {}, "Select both grid-cost and consumption statistics in Electricity settings"
-    metadata = await get_instance(hass).async_add_executor_job(list_statistic_ids, hass, {cost, energy}, "sum")
-    units = {row["statistic_id"]: row.get("unit_of_measurement") for row in metadata}
+    # HA rejects a statistic_type filter combined with explicit statistic IDs.
+    # Request these IDs, then check their sum capability and stored units here.
+    metadata = await get_instance(hass).async_add_executor_job(list_statistic_ids, hass, {cost, energy})
+    # Recorder exposes the stored statistic unit separately from the UI display
+    # unit in recent HA versions. Validate the stored unit used by this query.
+    units = {row["statistic_id"]: row.get("statistics_unit_of_measurement", row.get("unit_of_measurement"))
+        for row in metadata if row.get("has_sum")}
     if units.get(cost) not in {"EUR", "€"} or units.get(energy) != "kWh":
         return {}, {}, "Selected statistics must provide accumulated cost in EUR and consumption in kWh (with sum statistics)"
     now = dt_util.now()

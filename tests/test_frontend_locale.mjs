@@ -239,6 +239,63 @@ await panel._runElectricityAction(actionModal,"retrain");
 assert.match(actionStatus.textContent,/3 completed months/);
 assert.match(modelStatus.innerHTML,/1.25 ms/);
 assert.ok(actionButtons.every(button=>!button.disabled));
+
+// Bill entry targets one consumption month and never sends a payment mutation.
+panel._currentDateParts = () => ({year:2026,month:9,day:7});
+panel._month = "2026-09";
+panel._state = {settings:{electricity:{learning_enabled:false}},electricity:{history:{}},months:{"2026-09":{items:[electricItem]}}};
+let billSubmit, billHtml;
+panel._openModal = (_title, fields, _submit, callback) => { billHtml = fields; billSubmit = callback; };
+panel._openElectricityBill("electric");
+assert.match(billHtml, /Automatic learning is paused/);
+assert.match(billHtml, /name="total"[^>]*value=""/);
+assert.match(billHtml, /name="fixed_fees"/);
+let billRequest;
+panel._hass.callWS = async request => { billRequest = request; };
+await billSubmit(new Map([["total","234.56"],["kwh","1000.5"],["fixed_fees","26.96"],["enabled","on"]]));
+assert.deepEqual(billRequest, {type:"budget_manager/electricity",action:"bill",document:{payment_month:"2026-09",item_id:"electric",total:234.56,kwh:1000.5,fixed_fees:26.96,enabled:true}});
+assert.equal(panel._canRecordElectricityBill("2026-09"), false);
+assert.equal(panel._canRecordElectricityBill("2026-08"), true);
+const feeHtml = panel._electricityFeeRow();
+assert.match(feeHtml, /No start limit/);
+assert.match(feeHtml, /No end limit/);
+assert.match(feeHtml, /name="fee-from"[^>]*disabled/);
+assert.match(panel._electricityFeeRow({from_month:"2026-09"}), /name="fee-from"[^>]*required/);
+
+// Native HA picker properties, selection updates and clearing reach FormData.
+const fields = ["cost_statistic_id", "energy_statistic_id", "price_entity_id"].map(name => {
+  const input = {value:"sensor.original"}, host = {replaceChildren(picker) { this.picker = picker; }}, status = {};
+  return {dataset:{electricityPicker:name,label:name},input,host,status,querySelector:selector => selector === "input" ? input : selector === "[data-picker-host]" ? host : status};
+});
+const originalGet = customElements.get;
+customElements.get = () => true;
+globalThis.document = {createElement:tag => ({tag,addEventListener(_event, callback) { this.onChange = callback; }})};
+await panel._initElectricityPickers({querySelectorAll:()=>fields});
+assert.equal(fields[0].host.picker.tag, "ha-statistic-picker");
+assert.equal(fields[0].host.picker.statisticTypes, "sum");
+assert.deepEqual(fields[0].host.picker.includeStatisticsUnitOfMeasurement, ["EUR","€"]);
+assert.deepEqual(fields[1].host.picker.includeStatisticsUnitOfMeasurement, ["kWh"]);
+assert.equal(fields[2].host.picker.tag, "ha-selector");
+assert.deepEqual(fields[2].host.picker.selector, {entity:{filter:{domain:"sensor"}}});
+fields[0].host.picker.onChange({stopPropagation(){},detail:{value:"sensor.cost"}});
+assert.equal(fields[0].input.value, "sensor.cost");
+fields[0].host.picker.onChange({stopPropagation(){},detail:{value:undefined}});
+assert.equal(fields[0].input.value, "");
+customElements.get = originalGet;
+await panel._initElectricityPickers({querySelectorAll:()=>fields});
+assert.match(fields[0].status.textContent, /reopen these settings/);
+
+// On a cold page the helper returns before the lazy card class is registered.
+let nativeLoaded = false, loaderConfig;
+window.loadCardHelpers = async () => ({createCardElement(config) { loaderConfig = config; return {}; }});
+customElements.get = name => name === "hui-statistics-graph-card" ? {async getConfigElement() { nativeLoaded = true; }} : nativeLoaded;
+customElements.whenDefined = async name => { assert.equal(name, "hui-statistics-graph-card"); };
+await panel._initElectricityPickers({querySelectorAll:()=>fields});
+assert.equal(nativeLoaded, true);
+assert.equal(loaderConfig.entities.length, 1);
+assert.equal(fields[0].status.textContent, "");
+customElements.get = originalGet;
+delete window.loadCardHelpers;
 panel._hass.callWS=async()=>{throw new Error("Recorder unavailable")};
 await panel._runElectricityAction(actionModal,"refresh");
 assert.equal(actionStatus.textContent,"Failed: Recorder unavailable");

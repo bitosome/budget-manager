@@ -155,7 +155,7 @@ def train(history, settings, current_month):
     price = sum(w * r["grid_cost"] for r, w in zip(rows, weights)) / sum(w * r["kwh"] for r, w in zip(rows, weights))
     model = {"samples": len(rows), "coefficients": coefficients, "daily_kwh": daily,
         "price_coefficients": price_coefficients,
-        "unit_price": price, "method": settings["method"], "trained_through": rows[-1]["month"],
+        "unit_price": price, "method": settings["method"], "trained_from": rows[0]["month"], "trained_through": rows[-1]["month"],
         "trained_at_month": current_month, "history_months": settings["history_months"]}
     return model
 

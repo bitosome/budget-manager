@@ -19,14 +19,15 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Advanced Estonian hourly income converts hourly gross pay into estimated net income using either the budget month's or previous month's working-time fund, including configurable tax-free income, unemployment insurance, social-tax minimum, and 0/2/4/6% funded pension options.
 - Estonian child-care sick leave can be linked to an automatic hourly salary. Calendar periods reduce only scheduled work hours, while each period creates a separate estimated Tervisekassa income in the salary-payment month.
 - Care-benefit planning can approximate the previous year's income from the linked hourly salary or use a user-entered previous-year social-taxable income total.
+- Smart **Electricity** expenditures use the previous consumption month's measured costs plus fixed fees, with a local adaptive model and configurable buffer for months that still need forecasting.
+- Electricity settings include editable/importable bill history, learning controls, actual training status and historical forecast-error reporting. No household training data is bundled.
 - Mobile includes a menu button that opens Home Assistant's native sidebar for switching panels.
 - Add, edit, and delete income, expenditures, and manual savings when automatic savings is disabled.
 - One-time, monthly, yearly, or **Custom** recurrence (every N months), ending **Never** or on a chosen date.
 - Calendar-style save confirmation: change only this occurrence or this and following occurrences. Completed future payments are preserved; shared names still update across all months.
 - Manage categories in **Budget → Settings**; choose a category from a dropdown when editing an item.
-- Required end date for recurring items.
-- Edit/delete one occurrence or the current-and-future unpaid series.
 - Mark expenses paid and income received without automatically changing the manual account balance.
+- Completed income and expenditures move to the end of their month-view lists; paid amounts in the plan table are crossed out without an extra tick.
 - Optional assignment to a Home Assistant user with an active Companion App notification device. Assigned items require a due day and send targeted reminders from the chosen time every hour until completion or the end of that day, while calendar entries remain all-day events.
 - Concise signed calendar titles such as `Apple iCloud -€9.99` and `Валя +€1873.24`.
 - Create a blank month or copy any specific month.
@@ -110,20 +111,131 @@ Add `https://github.com/bitosome/budget-manager` to HACS as an **Integration**, 
 
 Choose **Electricity (smart)** when adding an expenditure, with monthly recurrence and the desired due day. Add one such expenditure per month for the configured household electricity supply. Its amount is calculated automatically; it cannot be overwritten in the plan table. Marking it paid freezes that amount, and reopening it resumes calculation.
 
+### Setup and data sources
+
 In **Budget → Settings → Electricity settings**:
 
 1. Select the accumulated grid-cost statistic in **EUR** and grid-consumption statistic in **kWh** used by Home Assistant Energy. Both must have Recorder sum statistics. The current sensor state is not a monthly bill: Budget Manager reads reset-safe hourly changes from Recorder, using Home Assistant's timezone and handling daylight-saving transitions.
 2. Ensure the cost source includes variable network charges, taxes and VAT. For example, Energy can calculate cost from a consumption meter and a `real-electricity-price` all-inclusive price sensor. Budget Manager uses the resulting cost statistic; it does not integrate a price sensor by itself. The optional price-reference field is diagnostic only, not an instantaneous-price forecast input.
 3. Add each missing **fixed monthly fee including VAT** separately. Optional start/end months refer to consumption months. Do not add charges already included in the cost source.
 4. Import or enter completed monthly bills in **Review / import history**. Enter consumption, the total bill minus fixed fees, and the billed fixed fees separately. Combine partial supplier bills for the same consumption month before importing. Confirmed bills override measured Recorder data. Uncheck a month to exclude it from learning while retaining its bill; removing a Recorder month also suppresses it on later refreshes until it is added again.
+5. **Save settings**, then use **Refresh statistics** to read the configured history window. Check the result under Model status. With automatic learning enabled, usable completed months train the model automatically; **Retrain now** forces a new fit using saved settings and the history already loaded.
+
+There is one electricity configuration per budget, not separate models for multiple meters or properties. Selecting an Electricity item alone does not configure its sources. Source fields start empty, and fixed fees alone are not enough to estimate consumption or variable cost. Electricity calculations currently use EUR and kWh; there is no currency or energy-unit conversion.
+
+### When measurement replaces prediction
 
 The payment month always follows the consumption month: October uses September. During September, October shows measured cost so far plus a projection of the remainder and fixed fees. Later payments use a local forecast. **Billed**, **Measured**, and **Estimated** labels distinguish invoice totals, complete Recorder measurements, and forecasts. Recorder measurements can differ from supplier invoices; importing the invoice reconciles that month. Incomplete measured months are not treated as complete bills.
 
-The lightweight local model fits regularized seasonal regressions for daily consumption and variable unit price, weighting recent months more heavily. With fewer than six training months it uses a weighted average; with no usable history it uses explicitly configured fallback consumption and price. A multi-day consumption-weighted price average adapts forecasts to recent changes. The configurable buffer applies only to **unmeasured variable costs**, never to already measured costs or fixed fees. It is a planning margin, not a guarantee against future price spikes.
+| Consumption-month data | Amount in the following payment month |
+| --- | --- |
+| Confirmed/imported completed bill | Billed variable cost + billed fixed fees; no prediction or buffer |
+| Complete measurements for a closed month | Measured monthly cost + applicable fixed fees; no prediction or buffer |
+| Current month with usable measurements | Measured cost so far + forecast remainder + buffer on that remainder + fixed fees |
+| Future month, or a past month missing complete data | Forecast variable cost + buffer + fixed fees, explicitly marked Estimated |
+
+**Once September has ended and its complete statistics have been read, October uses September's measured cost plus fixed fees—not a prediction.** This follows calendar-month boundaries in Home Assistant's timezone, independently of the budget's payday-cycle setting. The switch occurs on a statistics refresh after the final hourly data becomes available, not necessarily exactly at midnight. Already-paid occurrences remain frozen.
+
+```text
+Open consumption month:
+  bill = measured cost so far
+       + estimated remaining kWh × predicted variable price per kWh
+       + buffer percentage × estimated remaining variable cost
+       + fixed monthly fees
+
+Closed consumption month with complete measurements:
+  bill = measured monthly cost + fixed monthly fees
+```
+
+Fixed fees are added once per consumption month, not per day, and never receive the buffer. For example, a closed month with €180 measured variable cost and €20 fixed fees produces a €200 expenditure, regardless of the configured buffer percentage. These numbers are illustrative, not installation defaults.
+
+### Recording an actual invoice
+
+After the consumption month ends, open the following month's budget and choose **Record actual bill** on the unpaid Electricity item (or **Edit actual bill** to correct it). Enter the full invoice total including VAT, billed kWh, and the fixed fees already included in that total. Consumption and fees may be prefilled from measurements/settings; check them against the invoice. For separate supplier and network invoices, combine the costs and fees but count their shared consumption only once.
+
+Saving replaces only that consumption month's confirmed history. Variable training cost is `invoice total − billed fixed fees`; the expenditure becomes the exact invoice total with no extra fees or prediction buffer. Confirmed bills override Recorder measurements even after later refreshes. Future fixed-fee settings, other history months, and the manual account balance are unchanged. Saving does **not** mark the bill paid; check it after transferring the money. Reopen a paid item before correcting its bill.
+
+The **Use this month for model training** checkbox can exclude an unusual invoice from training without losing its actual payable amount. Automatic learning refits eligible history after saving; if learning is paused, the invoice is retained for the next manual retraining or resumed learning. Zero-consumption and out-of-window months are stored but do not train the model.
+
+Electricity settings use Home Assistant's native sum-statistics pickers for accumulated cost and consumption, and its native sensor selector for the optional price reference. Optional fee bounds display **No start limit** / **No end limit** until you choose a month.
+
+### Prediction model: what is trained
+
+The adaptive model is **recency-weighted, regularized seasonal regression**, implemented with Python's standard library. It is a small statistical machine-learning model, not an LLM, neural network or externally downloaded pretrained model.
+
+Each usable completed month supplies:
+
+- the consumption month;
+- total consumption in kWh; and
+- variable grid cost including VAT, excluding separately recorded fixed fees.
+
+It fits two patterns independently: **daily consumption** (`monthly kWh / days in month`) and **variable unit price** (`variable cost / kWh`). Each pattern uses an intercept and a sine/cosine pair for the month of the year, giving six fitted coefficients in total. Fitting is performed in logarithmic space, with regularization that dampens seasonal effects when history is sparse. Predictions are also bounded relative to the weighted historical averages to reduce extreme extrapolation. Fixed fees are not learned; they remain explicit settings or billed amounts.
+
+Training uses only enabled, completed months with positive consumption inside the selected history window. It never learns from its own forecasts or partial-month observations. Imported bills take priority over Recorder observations for the same month, avoiding duplicate samples. Monthly records with zero consumption can still represent a known bill but do not train the model.
+
+Recent observations receive exponentially higher weight:
+
+```text
+sample weight = 2 ^ (-age in months / learning half-life in months)
+```
+
+With the default six-month half-life, an observation six months older than another has half its weight. Training recalculates the coefficients from eligible history; it is not a background neural-network training job with epochs. A small fit can legitimately complete in milliseconds.
+
+With **six or more** usable months, the adaptive method applies its seasonal patterns. With **one to five**, predictions use recency-weighted averages instead. The **Recent weighted average** method uses those averages regardless of sample count. With no training samples, the model uses explicitly configured fallback consumption and price; without a usable estimate, it displays **Needs data**.
+
+### Adapting during the month
+
+Model fitting and live forecast updates are separate operations. Recent price adaptation uses `cost / kWh` from paired Recorder hours within the last seven days, requiring at least 72 usable hours and positive consumption. By default, that average has 50% weight when blended with the model's predicted price. It does not extrapolate a single instantaneous price reading from `real-electricity-price`.
+
+For the current consumption month, measured accrual is used only when at least 95% of elapsed complete hours have paired cost and energy data. After approximately three days, observed consumption also starts influencing the full-month consumption projection, with increasing weight as the month progresses. A closed month requires complete hourly coverage to qualify as **Measured**. Gaps are not silently counted as free electricity.
+
+The configurable buffer applies only to **unmeasured variable costs**, never to already measured costs or fixed fees. It is a planning margin, not a guarantee against future price spikes.
+
+### Forecast settings and training status
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Estimation method | Adaptive seasonal regression | Seasonal model or recent weighted average |
+| Learn automatically | On | Refit when history, training settings or the current month changes |
+| History window | 36 months | Limit eligible historical samples; configurable from 3 to 60 months |
+| Learning half-life | 6 months | Control how quickly older samples lose influence |
+| Recent-price weight | 50% | Blend recent measured variable prices with the model prediction |
+| Buffer | 15% | Add a margin to unmeasured variable costs only |
+| Fallback monthly consumption | 0 kWh | User-supplied starting estimate when no trained model is available |
+| Fallback variable price | €0/kWh | User-supplied starting price when no trained price is available |
+| Fixed fees | None | Separately configured monthly charges, with optional effective dates |
 
 Settings expose the method, history window, learning half-life, recent-price weight, buffer, fallbacks, training sample count and walk-forward mean absolute error before the buffer. Pause automatic learning to freeze fitted weights, retrain manually, or reset the model while retaining history. Measured costs keep updating when learning is paused. Statistics refresh hourly and on startup; use the panel's refresh button to load updated values into an already-open view. No cloud AI service, GPU or large ML dependency is required. Training runs locally on completed months, never on forecast values or partial months.
 
+The controls use **saved settings**:
+
+- **Refresh statistics** reads source data and reports how many complete measured months were found, together with coverage warnings or errors. Automatic learning then refits if its inputs changed.
+- **Retrain now** fits the loaded history immediately, even when automatic learning is paused. It does not fetch missing history or re-enable automatic learning.
+- **Reset model** clears fitted weights and pauses automatic learning while retaining history. Retrain or enable automatic learning to fit it again.
+- **Review / import history** lets you correct records, exclude outliers from learning, or remove months. Saving replaces the confirmed-history set shown in the editor; review imported rows before saving.
+
+Model status reports the actual last training-attempt time, elapsed milliseconds, samples used, historical error and last statistics-refresh result. Missing sources, zero usable samples and Recorder failures are explained explicitly. Action results update in place without closing the dialog or jumping to the top. Unrelated budget edits do not retrain an unchanged model. Pausing learning freezes the fitted coefficients, but live-price blending, current-month accrual and the switch to completed measurements still operate.
+
+### Accuracy and limitations
+
+The displayed error is **walk-forward mean absolute error in EUR** for historical variable monthly costs, before buffer and fixed fees. Each evaluated month is predicted by a model trained only on earlier months, with at least six prior usable samples. This checks historical seasonal predictions without using future information. It does not recreate historical live-price blending or partial-month updates, and is not a confidence interval or a guarantee of future accuracy.
+
+The model has no weather forecast, household occupancy, market-futures or grid-outage inputs. It can learn recurring seasonal patterns and adapt to measured changes, but cannot foresee an unexpected price spike or a new household consumption pattern. Six samples enable seasonality; they do not establish its reliability. Negative variable costs can be retained in history, but the seasonal price fit uses a small positive floor and is not designed to model negative-price regimes. A net bill credit is shown as a zero expense with a warning, not an automatically created income.
+
+### Missing data and troubleshooting
+
 Without usable history or fallbacks, Electricity displays **Needs data**, budget totals are explicitly incomplete, and automatic savings transfers are paused. It cannot be marked paid until a value can be calculated. No zero-value payment events are created for missing electricity data.
+
+If this appears after creating an Electricity expenditure:
+
+1. Check that **both** source-statistic fields are populated and saved; entering fees or selecting a price-reference sensor is not enough.
+2. Refresh statistics and read the result. Verify the selected sources have accumulated EUR/kWh sum statistics and overlapping hourly history, not just current sensor states.
+3. If complete months are unavailable, import completed bills or supply deliberate fallback values. Do not interpret missing data as a €0 bill.
+4. If training reports zero samples despite loaded history, check enabled flags, positive kWh values and the history window.
+
+After installing an update, restart Home Assistant and reopen Budget so the backend and frontend use the same version. These controls do not configure Home Assistant Energy or repair missing Recorder data themselves.
+
+### History format, backup and privacy
 
 Electricity history, settings and model inputs are included in the full budget export. Import rebuilds the model from validated history rather than trusting a supplied model payload. A dedicated electricity-history JSON import/export is also available (synthetic example):
 
@@ -138,8 +250,6 @@ Electricity history, settings and model inputs are included in the full budget e
 ```
 
 Invoice history is private household data. No personal invoices, pretrained household model or Gmail credentials are distributed with the integration. Reviewing bills in Gmail is a separate data-preparation step; the installed integration does not access Gmail.
-
-Training controls report the actual completion time, elapsed milliseconds, sample count and last statistics-refresh result without closing the settings dialog. The local model is small and may legitimately finish in milliseconds. Empty history, missing source selections and Recorder failures are shown explicitly. Controls use **saved** settings, and unrelated budget edits do not retrain an unchanged model.
 
 ## Home Assistant entities
 
@@ -186,6 +296,7 @@ Copying a month or year:
 
 - Copies names, amounts, due days, assignees, reminder times, categories, item notes, and special/renewal markers.
 - Recalculates copied Estonian hourly income using the target month's working hours.
+- Recalculates copied smart Electricity items for the target payment month's previous consumption month, rather than keeping the source month's bill amount.
 - Resets account balances.
 - Resets paid/received/skipped items to pending.
 - Assigns fresh occurrence IDs.

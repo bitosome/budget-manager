@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 from time import perf_counter
 from typing import Any
 
@@ -71,6 +72,9 @@ from .model import (
     normalize_thresholds,
     validate_month_key,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class BudgetManager:
@@ -498,11 +502,14 @@ class BudgetManager:
                 return
             try:
                 observations, live, warning = await async_read_statistics(self.hass, settings, full=full)
-            except Exception:
+            except Exception as err:
                 # Keep the last good data and mark it stale. Never replace missing readings with zero.
+                _LOGGER.exception("Unable to refresh Budget Manager electricity Recorder statistics")
                 async with self._lock:
+                    if settings != self._data["settings"]["electricity"]:
+                        return
                     state = self._data.setdefault("electricity", electricity.empty_state())
-                    state["warning"] = "Electricity statistics are unavailable; retaining the last data"
+                    state["warning"] = f"Electricity statistics are unavailable ({type(err).__name__}); retaining the last data. See Home Assistant logs for details."
                     state["live"] = {}
                     state["refresh"] = {"status": "error", "finished_at": datetime.now(timezone.utc).isoformat(),
                         "duration_ms": round((perf_counter() - timer) * 1000, 2), "message": state["warning"], "months": 0}
@@ -527,7 +534,35 @@ class BudgetManager:
         async with self._transaction():
             state = self._data.setdefault("electricity", electricity.empty_state())
             settings = self._data["settings"]["electricity"]
-            if action == "history":
+            if action == "bill":
+                if not isinstance(document, dict):
+                    raise BudgetValidationError("A bill document is required")
+                try:
+                    payment_month = electricity.month_key(document.get("payment_month"))
+                except ValueError as err:
+                    raise BudgetValidationError(str(err)) from err
+                month = self._require_month(payment_month)
+                item = next((item for item in month["items"] if item["id"] == document.get("item_id")), None)
+                if not item or item.get("expense_type") != "electricity":
+                    raise BudgetValidationError("Select a smart electricity expenditure")
+                if item["status"] != STATUS_PENDING:
+                    raise BudgetValidationError("Reopen the paid expenditure before changing its bill")
+                try:
+                    consumption = electricity.shift_month(payment_month, -1)
+                    if consumption >= self.today().strftime("%Y-%m"):
+                        raise ValueError("Record a bill only after its consumption month has ended")
+                    total = round(electricity.number(document.get("total"), "Invoice total"), 2)
+                    fees = round(electricity.number(document.get("fixed_fees"), "Billed fixed fees"), 2)
+                    rows = electricity.normalize_history([{"month": consumption,
+                        "kwh": document.get("kwh"), "grid_cost": round(total - fees, 2),
+                        "fixed_fees": fees, "enabled": document.get("enabled", True), "source": "bill"}])
+                except ValueError as err:
+                    raise BudgetValidationError(str(err)) from err
+                # Confirmed invoices override Recorder, without replacing other months.
+                # Fees belong to this invoice; future fee settings remain unchanged.
+                state.setdefault("history", {}).update(rows)
+                state["ignored_months"] = [key for key in state.get("ignored_months", []) if key != consumption]
+            elif action == "history":
                 if not isinstance(document, dict) or document.get("format") != electricity.HISTORY_FORMAT or document.get("version") != 1:
                     raise BudgetValidationError("Not an electricity history file")
                 try:

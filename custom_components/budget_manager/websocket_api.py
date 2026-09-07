@@ -56,7 +56,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/electricity",
-    vol.Required("action"): vol.In(["history", "retrain", "reset", "refresh"]),
+    vol.Required("action"): vol.In(["bill", "history", "retrain", "reset", "refresh"]),
     vol.Optional("document"): dict})
 @websocket_api.require_admin
 @websocket_api.async_response
