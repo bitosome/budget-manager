@@ -221,6 +221,10 @@ const styles = panel._styles();
 assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);
 assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);
+assert.match(styles, /\.matrix-group \.matrix-group-heading\s*\{[^}]*position:sticky/);
+assert.match(styles, /\.matrix-section\s*\{[^}]*width:calc\(100% \+ 24px\)/);
+assert.match(styles, /\.item-main\s*\{[^}]*grid-column:2; grid-row:1/);
+assert.doesNotMatch(styles, /\.more-button/);
 
 const electricItem = {id:"electric", name:"Electricity",kind:"expense",expense_type:"electricity",amount:120,status:"pending",electricity:{status:"measured",consumption_month:"2026-08"}};
 assert.equal(panel._itemHasMonthlyValue({...electricItem, amount:0}), true);
@@ -256,6 +260,16 @@ await billSubmit(new Map([["total","234.56"],["kwh","1000.5"],["fixed_fees","26.
 assert.deepEqual(billRequest, {type:"budget_manager/electricity",action:"bill",document:{payment_month:"2026-09",item_id:"electric",total:234.56,kwh:1000.5,fixed_fees:26.96,enabled:true}});
 assert.equal(panel._canRecordElectricityBill("2026-09"), false);
 assert.equal(panel._canRecordElectricityBill("2026-08"), true);
+const eligibleElectricityRow = panel._renderItem(electricItem, "expense");
+assert.match(eligibleElectricityRow, /mdi:pencil/);
+assert.match(eligibleElectricityRow, /Record actual bill/);
+assert.doesNotMatch(eligibleElectricityRow, /•••/);
+const unavailableElectricityRow = panel._renderItem({
+  ...electricItem,
+  electricity: {...electricItem.electricity, consumption_month:"2026-09"},
+}, "expense");
+assert.match(unavailableElectricityRow, /Actual bill after Sep ends/);
+assert.match(unavailableElectricityRow, /disabled/);
 const feeHtml = panel._electricityFeeRow();
 assert.match(feeHtml, /No start limit/);
 assert.match(feeHtml, /No end limit/);
