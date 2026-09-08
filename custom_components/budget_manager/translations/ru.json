@@ -34,7 +34,7 @@
   "entity": {
     "sensor": {
       "daily_allowance": {"name": "Бюджет в день"},
-      "remaining": {"name": "Прогноз остатка"},
+      "remaining": {"name": "Остаток"},
       "unpaid_expenses": {"name": "Неоплаченные расходы"},
       "expected_income": {"name": "Ожидаемый доход"},
       "planned_savings": {"name": "План накоплений"}

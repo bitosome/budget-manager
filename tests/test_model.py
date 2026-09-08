@@ -315,6 +315,35 @@ class BudgetModelTests(unittest.TestCase):
         savings = month["items"][1]
         self.assertEqual(summary["effective_amounts"][savings["id"]], 150)
         self.assertEqual(summary["daily_allowance"], 45)
+        self.assertEqual(summary["daily_target_shortfall"], 0)
+
+    def test_automatic_savings_reports_daily_target_shortfall(self) -> None:
+        month = model.make_month("2026-09")
+        month["payday"] = "2026-09-30"
+        month["account_balance"] = 1200
+        month["items"] = [
+            model.normalize_item(
+                {
+                    "name": "Savings",
+                    "kind": "savings",
+                    "amount": 0,
+                    "automatic_savings": True,
+                }
+            )
+        ]
+
+        summary = model.calculate_month(
+            month,
+            settings={
+                "automatic_savings_enabled": True,
+                "savings_target_threshold": 45,
+                "savings_floor_threshold": 40,
+            },
+            today=date(2026, 9, 1),
+        )
+
+        self.assertEqual(summary["daily_allowance"], 40)
+        self.assertEqual(summary["daily_target_shortfall"], 150)
 
     def test_rag_uses_the_displayed_daily_allowance_at_threshold(self) -> None:
         month = model.make_month("2027-03")
@@ -951,6 +980,27 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
             self.manager.data["settings"]["plan_item_order"]["income"],
             ["Charlie", "Bravo", "Alpha", "Delta"],
         )
+
+    async def test_month_view_keeps_plan_order_after_item_edit(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        zulu = model.normalize_item(
+            {"name": "Zulu", "kind": "expense", "amount": 20, "due_day": 28}
+        )
+        alpha = model.normalize_item(
+            {"name": "Alpha", "kind": "expense", "amount": 10, "due_day": 1}
+        )
+        month["items"] = [alpha, zulu]
+        self.manager.data["settings"]["plan_item_order"]["expense"] = [
+            "Zulu",
+            "Alpha",
+        ]
+
+        await self.manager.async_upsert_item(
+            "2026-09", {**alpha, "amount": 15, "due_day": 31}, scope="this"
+        )
+
+        items = self.manager.snapshot(2026)["months"]["2026-09"]["items"]
+        self.assertEqual([item["name"] for item in items], ["Zulu", "Alpha"])
 
     async def test_plan_item_order_rejects_unknown_rows(self) -> None:
         with self.assertRaisesRegex(model.BudgetValidationError, "unknown income"):

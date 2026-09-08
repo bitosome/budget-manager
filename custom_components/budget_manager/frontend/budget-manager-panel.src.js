@@ -298,6 +298,28 @@ class BudgetManagerPanel extends HTMLElement {
     }).format(new Date(Date.UTC(year, month - 1, 1, 12)));
   }
 
+  _adjacentMonth(direction) {
+    const available = [...(this._state?.available_months || Object.keys(this._state?.months || {}))].sort();
+    const index = available.indexOf(this._month);
+    if (index < 0) return null;
+    return available[index + direction] || null;
+  }
+
+  async _openExistingMonth(monthKey) {
+    if (!monthKey) return;
+    const targetYear = Number(monthKey.slice(0, 4));
+    this._defaultViewApplied = true;
+    this._currentMonthRequested = false;
+    if (!this._state.months[monthKey]) {
+      this._month = null;
+      await this._load(targetYear);
+    }
+    if (!this._state?.months?.[monthKey]) return;
+    this._year = targetYear;
+    this._month = monthKey;
+    this._render();
+  }
+
   _incomeWorkingMonth(budgetMonth, workPeriod) {
     if (workPeriod !== "previous_month") return budgetMonth;
     const [year, month] = budgetMonth.split("-").map(Number);
@@ -334,13 +356,17 @@ class BudgetManagerPanel extends HTMLElement {
     if (!this._state) {
       return `<div slot="title" class="native-title"><strong>Budget Manager</strong><small>Local Home Assistant budget</small></div>`;
     }
+    const previousMonth = this._month ? this._adjacentMonth(-1) : null;
+    const nextMonth = this._month ? this._adjacentMonth(1) : null;
     return `
       <div slot="title" class="native-title">
         <strong>Budget Manager</strong>
         <small>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</small>
       </div>
       <div slot="actionItems" class="header-actions ${this._month ? "month-header" : "plan-header"}">
+          ${previousMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${previousMonth}" title="Previous month: ${this._esc(this._monthLabel(previousMonth))}" aria-label="Previous month: ${this._esc(this._monthLabel(previousMonth))}">‹ <span>${this._esc(this._monthName(previousMonth))}</span></button>` : ""}
           ${this._month ? `<button class="app-bar-button" data-action="back-year">← Plan</button>` : ""}
+          ${nextMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${nextMonth}" title="Next month: ${this._esc(this._monthLabel(nextMonth))}" aria-label="Next month: ${this._esc(this._monthLabel(nextMonth))}"><span>${this._esc(this._monthName(nextMonth))}</span> ›</button>` : ""}
           ${this._canEdit ? `<button class="app-bar-button settings-action" data-action="settings">Settings</button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
           <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh">↻</button>
@@ -442,11 +468,14 @@ class BudgetManagerPanel extends HTMLElement {
       }
       return a.name.localeCompare(b.name);
     });
+    const renderGroupHeading = (kind, label, showDot = true) => this._stickyFirstColumn
+      ? `<tr class="matrix-group ${kind}"><th class="matrix-group-heading">${showDot ? `<span class="kind-dot"></span>` : ""}${label}</th><td colspan="${months.length}" aria-hidden="true"></td></tr>`
+      : `<tr class="matrix-group ${kind}"><th colspan="${months.length + 1}"><span class="matrix-group-label">${showDot ? `<span class="kind-dot"></span>` : ""}${label}</span></th></tr>`;
     const renderGroup = (group) => {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
       const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
-      return `<tr class="matrix-group ${group.kind}"><th colspan="${months.length + 1}"><span class="matrix-group-label"><span class="kind-dot"></span>${group.label}</span></th></tr>${groupRows.map((row) => {
+      return `${renderGroupHeading(group.kind, group.label)}${groupRows.map((row) => {
         const orderIndex = reorderable.indexOf(row);
         const editableName = this._matrixEditMode && orderIndex >= 0;
         const controls = editableName
@@ -467,20 +496,20 @@ class BudgetManagerPanel extends HTMLElement {
       <section class="matrix-section ${this._stickyFirstColumn ? "sticky-first-column" : ""}">
         ${sectionTitle}
         <div class="matrix-wrap">
-          <table class="matrix" style="min-width:${itemColumnWidth + months.length * 74}px">
+          <table class="matrix" style="min-width:${itemColumnWidth + months.length * 96}px">
             <colgroup><col class="item-column" style="width:${itemColumnWidth}px">${months.map(() => `<col class="month-column">`).join("")}</colgroup>
             <thead>
               <tr class="matrix-years"><th>Year</th>${visibleYears.map(({ year, count }) => `<th colspan="${count}">${year}</th>`).join("")}</tr>
-              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th><button type="button" class="month-heading-button" data-action="open-plan-month" data-month="${key}" aria-label="Open ${this._esc(this._monthLabel(key))}">${this._esc(this._monthName(key, "short"))}</button></th>`).join("")}</tr>
+              <tr><th><div class="item-heading"><span>Item</span><button class="column-pin-toggle ${this._stickyFirstColumn ? "on" : ""}" data-action="toggle-sticky-column" aria-pressed="${this._stickyFirstColumn}" title="${this._stickyFirstColumn ? "Unpin first column" : "Pin first column"}"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span>Sticky</span></button></div></th>${months.map((key) => `<th><button type="button" class="month-heading-button" data-action="open-plan-month" data-month="${key}" aria-label="Open ${this._esc(this._monthLabel(key))}">${this._esc(this._monthName(key))}</button></th>`).join("")}</tr>
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
-              <tr class="matrix-group summary"><th colspan="${months.length + 1}"><span class="matrix-group-label">Plan overview</span></th></tr>
+              ${renderGroupHeading("summary", "Plan overview", false)}
               ${this._matrixSummaryRow("Expected income", months, "expected_income")}
               ${this._matrixSummaryRow("Open expenses", months, "unpaid_expenses")}
-              ${this._matrixSummaryRow("Open savings", months, "planned_savings", "savings")}
-              ${this._matrixSummaryRow("Forecast remaining", months, "remaining")}
+              ${this._matrixSummaryRow("Remaining", months, "remaining")}
               ${this._matrixSummaryRow("EUR / day", months, "daily_allowance", "rag")}
+              ${this._state.settings.automatic_savings_enabled ? this._matrixSummaryRow("Target funding gap", months, "daily_target_shortfall", "shortfall") : ""}
             </tbody>
           </table>
         </div>
@@ -491,7 +520,7 @@ class BudgetManagerPanel extends HTMLElement {
     return `<tr class="summary-row ${tone}"><th>${label}</th>${months.map((monthKey) => {
       const summary = this._state.months[monthKey]?.summary;
       if (!summary) return `<td class="blank">—</td>`;
-      if (summary.incomplete && ["daily_allowance", "remaining", "planned_savings"].includes(key)) return `<td title="Electricity needs data; forecast is incomplete">Needs data</td>`;
+      if (summary.incomplete && ["daily_allowance", "remaining", "planned_savings", "daily_target_shortfall"].includes(key)) return `<td title="Electricity needs data; forecast is incomplete">Needs data</td>`;
       return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}">${this._money(summary[key])}</td>`;
     }).join("")}</tr>`;
   }
@@ -540,9 +569,10 @@ class BudgetManagerPanel extends HTMLElement {
       <section class="metrics">
         ${this._metric("Expected income", summary.expected_income, "income")}
         ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
-        ${this._metric("Open savings", summary.planned_savings, "savings")}
-        ${this._metric("Forecast remaining", summary.remaining, summary.remaining < 0 ? "danger" : "good")}
+        ${this._metric("Savings", summary.planned_savings, "savings")}
+        ${this._metric("Remaining", summary.remaining, summary.remaining < 0 ? "danger" : "good")}
         ${this._metric(`Per day · ${summary.days_divisor} days`, summary.daily_allowance, summary.rag)}
+        ${this._state.settings.automatic_savings_enabled ? this._metric("Target funding gap", summary.daily_target_shortfall, Number(summary.daily_target_shortfall) > 0 ? "danger" : "good") : ""}
       </section>
       ${this._renderItems("Expected money in", income, "income")}
       ${this._renderItems("Expenditures", expenses, "expense")}
@@ -610,20 +640,24 @@ class BudgetManagerPanel extends HTMLElement {
           ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
           ${item.automatic_savings ? ` · calculated to leave ${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : item.dynamic && kind === "savings" ? ` · target range ${this._money(this._state.settings.savings_floor_threshold ?? 40)}–${this._money(this._state.settings.savings_target_threshold ?? 45)}/day` : ""}
         </div>
-        ${electric && !complete && this._canEdit ? this._renderElectricityBillAction(item, electric) : ""}
       </div>
       <strong class="item-amount">${electric?.status === "missing" ? "Needs data" : this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
       ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="edit-button" data-action="edit-item" data-id="${item.id}" title="Edit ${this._esc(item.name)}" aria-label="Edit ${this._esc(item.name)}"><ha-icon icon="mdi:pencil"></ha-icon></button>` : ""}
     </article>`;
   }
 
-  _renderElectricityBillAction(item, electric) {
-    const eligible = this._canRecordElectricityBill(electric.consumption_month);
-    const label = electric.status === "actual" ? "Edit actual bill" : "Record actual bill";
-    if (eligible) {
-      return `<button class="quiet electricity-bill-button" data-action="electricity-bill" data-id="${item.id}"><ha-icon icon="mdi:receipt-text-edit-outline"></ha-icon><span>${label}</span></button>`;
-    }
-    return `<button class="quiet electricity-bill-button" type="button" disabled title="Actual bill entry becomes available after ${this._esc(this._monthLabel(electric.consumption_month))} ends"><ha-icon icon="mdi:receipt-text-outline"></ha-icon><span>Actual bill after ${this._esc(this._monthName(electric.consumption_month, "short"))} ends</span></button>`;
+  _electricityBillEditorHtml(item) {
+    if (!item || item.expense_type !== "electricity") return "";
+    const electric = item.electricity || {};
+    const consumptionLabel = electric.consumption_month
+      ? this._monthLabel(electric.consumption_month)
+      : "the consumption month";
+    const eligible = item.status === "pending" && this._canRecordElectricityBill(electric.consumption_month);
+    const label = electric.status === "actual" ? "Edit actual bill" : "Add actual bill";
+    const reason = item.status !== "pending"
+      ? "Reopen this expenditure before changing its actual bill."
+      : `Actual bill entry becomes available after ${consumptionLabel} ends.`;
+    return `<fieldset class="settings-group electricity-bill-editor" id="electricity-bill-editor"><legend>Actual electricity bill</legend><p class="form-help">Reconcile this expenditure with the supplier invoice for ${this._esc(consumptionLabel)} consumption. The bill remains unpaid until you check the expenditure.</p><button type="button" class="quiet electricity-bill-button" id="open-electricity-bill" ${eligible ? "" : `disabled title="${this._esc(reason)}"`}><ha-icon icon="mdi:receipt-text-edit-outline"></ha-icon><span>${this._esc(eligible ? label : reason)}</span></button></fieldset>`;
   }
 
   _bindEvents() {
@@ -648,7 +682,7 @@ class BudgetManagerPanel extends HTMLElement {
       });
     });
     const matrixWrap = this.shadowRoot.querySelector(".matrix-wrap");
-    if (matrixWrap) {
+    if (matrixWrap?.querySelector(".matrix-group-label")) {
       const syncGroupLabels = () => this._syncMatrixGroupLabels(matrixWrap);
       matrixWrap.addEventListener("scroll", syncGroupLabels, { passive: true });
       syncGroupLabels();
@@ -665,6 +699,7 @@ class BudgetManagerPanel extends HTMLElement {
     const action = button.dataset.action;
     if (action === "refresh") return this._load();
     if (action === "back-year") { this._month = null; return this._render(); }
+    if (action === "open-existing-month") return this._openExistingMonth(button.dataset.month);
     if (action === "prev-year") return this._load(this._year - 1);
     if (action === "next-year") return this._load(this._year + 1);
     if (action === "choose-year") return this._openYearPicker();
@@ -692,7 +727,6 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "edit-balance") return this._openBalanceEditor();
     if (action === "add-item") return this._openItemEditor();
     if (action === "edit-item") return this._openItemEditor(button.dataset.id);
-    if (action === "electricity-bill") return this._openElectricityBill(button.dataset.id);
     if (action === "toggle-status") return this._toggleStatus(button.dataset.id, button.dataset.kind);
     if (action === "delete-month") return this._deleteMonth();
   }
@@ -1018,7 +1052,7 @@ class BudgetManagerPanel extends HTMLElement {
       <p class="form-help">Check the prefilled consumption and fees against the invoice. Variable cost = bill total − billed fixed fees. The expense uses the exact bill total, with no forecast buffer or extra fees. Future fixed-fee settings are not changed.</p>
       <label class="check"><input type="checkbox" name="enabled" ${row?.enabled !== false ? "checked" : ""}><span>Use this month for model training</span></label>
       <p class="form-help">${this._state.settings.electricity?.learning_enabled === false ? "Automatic learning is paused. The bill will be saved; use Retrain now or resume learning to update forecasts." : "Saving retrains automatically when this month is eligible for the configured history window. Zero-consumption months cannot train the model."} Saving does not mark the expense paid or change your account balance.</p>`;
-    this._openModal("Record actual electricity bill", fields, "Save bill", async form => {
+    this._openModal(row ? "Edit actual electricity bill" : "Add actual electricity bill", fields, "Save bill", async form => {
       await this._hass.callWS({type:"budget_manager/electricity", action:"bill", document:{payment_month:paymentMonth,item_id:itemId,total:Number(form.get("total")),kwh:Number(form.get("kwh")),fixed_fees:Number(form.get("fixed_fees")),enabled:form.has("enabled")}});
     });
   }
@@ -1259,12 +1293,12 @@ class BudgetManagerPanel extends HTMLElement {
     }
   }
 
-  _openModal(title, fields, submitLabel, onSubmit, extraButtons = "") {
+  _openModal(title, fields, submitLabel, onSubmit, extraButtons = "", submitClass = "primary") {
     const root = this.shadowRoot.getElementById("modal-root");
     root.innerHTML = `<div class="modal-backdrop"><form class="modal" id="modal-form">
       <div class="modal-head"><h2>${title}</h2><button type="button" class="close" id="modal-close" aria-label="Close" title="Close"></button></div>
       <div class="modal-body">${fields}</div>
-      <div class="modal-actions">${extraButtons}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="primary" type="submit">${submitLabel}</button></div>
+      <div class="modal-actions">${extraButtons}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="${submitClass}" type="submit">${submitLabel}</button></div>
     </form></div>`;
     const close = () => { root.innerHTML = ""; };
     root.querySelector("#modal-close").onclick = close;
@@ -1375,6 +1409,7 @@ class BudgetManagerPanel extends HTMLElement {
       </div>
       ${this._field("Name", "name", item?.name ?? "", "text", "required")}
       <p class="form-help" id="electricity-item-help" hidden>Calculated from the previous calendar month's electricity use plus fixed fees. During that month it projects the full bill; later months use local forecasts and the configured buffer. Sources, fees and learning are managed in Settings → Electricity settings. Checking this expense freezes its amount as paid.</p>
+      ${this._electricityBillEditorHtml(item)}
       ${item && ["income", "expense"].includes(item.kind) ? `<p class="form-help">Names are shared across all months. When you save a recurring item, you can choose which occurrences receive the other changes.</p>` : ""}
       <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
         <legend>Child-care sick leave</legend>
@@ -1502,6 +1537,14 @@ class BudgetManagerPanel extends HTMLElement {
         },
       });
     }, extra);
+    const electricityBillButton = modal.root.querySelector("#open-electricity-bill");
+    const electricityBillEditor = modal.root.querySelector("#electricity-bill-editor");
+    if (electricityBillButton && !electricityBillButton.disabled) {
+      electricityBillButton.onclick = () => {
+        modal.close();
+        this._openElectricityBill(item.id);
+      };
+    }
     const recurrenceSelect = modal.root.querySelector("#recurrence");
     const endInput = modal.root.querySelector('[name="recurrence_end"]');
     const endMode = modal.root.querySelector('[name="recurrence_end_mode"]');
@@ -1619,6 +1662,7 @@ class BudgetManagerPanel extends HTMLElement {
       const careVisible = kindSelect.value === "care_leave";
       const electricityVisible = kindSelect.value === "electricity";
       modal.root.querySelector('#electricity-item-help').hidden = !electricityVisible;
+      if (electricityBillEditor) electricityBillEditor.hidden = !electricityVisible;
       dynamicSavings.hidden = !savingsVisible;
       dynamicSavingsHelp.hidden = !savingsVisible;
       incomeSection.hidden = kindSelect.value !== "income";
@@ -1849,13 +1893,20 @@ class BudgetManagerPanel extends HTMLElement {
     } catch (err) { this._showError(err); }
   }
 
-  async _deleteMonth() {
-    if (!window.confirm(`Delete ${this._monthLabel(this._month)} and all of its occurrences?`)) return;
-    try {
-      await this._hass.callWS({ type: "budget_manager/delete_month", month: this._month });
+  _deleteMonth() {
+    const monthKey = this._month;
+    const monthLabel = this._monthLabel(monthKey);
+    return this._openModal(
+      "Delete month?",
+      `<div class="delete-month-warning" role="alert"><strong>${this._esc(monthLabel)} will be permanently deleted.</strong><p>This removes the month and every income, expenditure, savings entry, and status stored in it. This action cannot be undone.</p></div>`,
+      "Delete month",
+      async () => {
+      await this._hass.callWS({ type: "budget_manager/delete_month", month: monthKey });
       this._month = null;
-      await this._load(this._year);
-    } catch (err) { this._showError(err); }
+      },
+      "",
+      "danger-primary",
+    );
   }
 
   _showError(err) {
@@ -1904,9 +1955,10 @@ class BudgetManagerPanel extends HTMLElement {
       #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
       .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }.review-notice.care-estimate-notice { border-color:color-mix(in srgb,var(--blue) 62%,var(--line)); background:color-mix(in srgb,var(--blue) 13%,var(--surface)); color:var(--ink); }.review-notice.care-estimate-notice span { color:var(--muted); }
       #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
+      .matrix-group td { padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; }.matrix-group.summary td { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; }.sticky-first-column .matrix .matrix-group-heading { position:sticky !important; left:0; z-index:3; overflow:hidden; text-overflow:ellipsis; }.month-nav-button { display:inline-flex; align-items:center; gap:5px; }.danger-primary { border-radius:10px; padding:10px 14px; background:var(--red); color:#fff; font-weight:700; }.delete-month-warning { padding:15px; border:1px solid color-mix(in srgb,var(--red) 48%,var(--line)); border-radius:12px; background:color-mix(in srgb,var(--red) 10%,var(--surface)); }.delete-month-warning strong { color:var(--red); }.delete-month-warning p { margin:8px 0 0; color:var(--muted); line-height:1.5; }
       @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
       @media (max-width:700px) { h1 { font-size:17px; } main { padding:18px 12px 50px; }.year-toolbar,.month-toolbar,.empty-plan { align-items:flex-start; flex-direction:column; }.toolbar-actions { width:100%; }.toolbar-actions button { flex:1; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) 40px; column-gap:10px; row-gap:8px; align-items:start; padding:14px 12px; }.status-button,.status-placeholder { grid-column:1; grid-row:1 / span 2; }.item-main { grid-column:2; grid-row:1; }.edit-button { grid-column:3; grid-row:1; justify-self:end; width:40px; height:40px; }.item-amount { grid-column:2 / span 2; grid-row:2; justify-self:end; align-self:end; }.matrix-section { width:calc(100% + 24px); margin-left:-12px; margin-right:-12px; border-left:0; border-right:0; border-radius:0; }.matrix-section > .section-title { padding-left:18px; padding-right:18px; }.matrix-group-label { left:8px; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
-      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; } }
+      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; }.month-nav-button span { display:none; } }
       .matrix-group-label { position:relative; left:auto; transform:translateX(var(--matrix-scroll-x,0px)); will-change:transform; }
     `;
   }

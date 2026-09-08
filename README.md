@@ -46,20 +46,22 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 For each month:
 
 ```text
-forecast remaining = manual account balance
+remaining = manual account balance
                    + expected income not yet received
                    - expenditures not yet paid
                    - open fixed savings
                    - calculated automatic savings
 
-EUR/day = forecast remaining / relevant days
+EUR/day = remaining / relevant days
+
+target funding gap = max(0, savings target × relevant days - remaining)
 ```
 
 The day divisor is the smaller of the number of days in the budget month and the inclusive number of days until its cycle end. By default, a budget month runs through the 2nd of the following calendar month; this day is configurable in Settings.
 
 Marking an item paid or received only changes its status. It does not change the account balance, which remains a deliberate manual input.
 
-When automatic savings is enabled in Settings, Budget Manager creates one system-managed Savings entry in every existing and newly created month. System-managed savings never require manual review. Its value starts from zero and takes only the money above the configured daily target:
+When automatic savings is enabled in Settings, Budget Manager also displays the target funding gap: the additional money required during the cycle to reach the configured ideal EUR/day target. It creates one system-managed Savings entry in every existing and newly created month. System-managed savings never require manual review. Its value starts from zero and takes only the money above the configured daily target:
 
 ```text
 automatic savings = max(0, money before savings - savings target × relevant days)

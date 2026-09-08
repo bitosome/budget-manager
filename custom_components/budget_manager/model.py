@@ -810,6 +810,16 @@ def calculate_month(
     remaining = before_dynamic_savings - dynamic_savings
     daily_allowance = remaining / divisor if divisor else 0
     displayed_daily_allowance = round(daily_allowance, 2)
+    automatic_savings_enabled = bool(
+        (settings or {}).get(
+            "automatic_savings_enabled", DEFAULT_AUTOMATIC_SAVINGS_ENABLED
+        )
+    )
+    daily_target_shortfall = (
+        max(0.0, savings_target_threshold * divisor - remaining)
+        if automatic_savings_enabled
+        else 0.0
+    )
     rag = (
         "green"
         if displayed_daily_allowance >= green_threshold
@@ -849,6 +859,7 @@ def calculate_month(
         "total_savings": round(total_savings, 2),
         "remaining": round(remaining, 2),
         "daily_allowance": displayed_daily_allowance,
+        "daily_target_shortfall": round(daily_target_shortfall, 2),
         "rag": rag,
         "green_threshold": green_threshold,
         "yellow_threshold": yellow_threshold,

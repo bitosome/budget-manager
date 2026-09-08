@@ -34,7 +34,7 @@
   "entity": {
     "sensor": {
       "daily_allowance": {"name": "Daily allowance"},
-      "remaining": {"name": "Forecast remaining"},
+      "remaining": {"name": "Remaining"},
       "unpaid_expenses": {"name": "Unpaid expenses"},
       "expected_income": {"name": "Expected income"},
       "planned_savings": {"name": "Planned savings"}

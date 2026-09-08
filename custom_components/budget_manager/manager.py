@@ -229,12 +229,31 @@ class BudgetManager:
             item["effective_amount"] = effective_amounts.get(
                 item["id"], item.get("amount", 0)
             )
+        plan_order = normalize_plan_item_order(
+            self._data.get("settings", {}).get("plan_item_order")
+        )
+        plan_rank = {
+            kind: {
+                name.casefold(): index
+                for index, name in enumerate(names)
+            }
+            for kind, names in plan_order.items()
+        }
+
+        def item_plan_rank(item: dict[str, Any]) -> int:
+            kind_ranks = plan_rank.get(item.get("kind"), {})
+            return kind_ranks.get(
+                str(item.get("name", "")).strip().casefold(),
+                len(kind_ranks),
+            )
+
         payload["items"].sort(
             key=lambda item: (
                 {"income": 0, "expense": 1, "savings": 2}.get(
                     item.get("kind"), 3
                 ),
                 item.get("status", STATUS_PENDING) != STATUS_PENDING,
+                item_plan_rank(item),
                 item.get("sort_order", 0),
                 item.get("due_day") or 0,
                 item.get("name", "").casefold(),

@@ -110,6 +110,7 @@ panel._matrixEditMode = true;
 panel._showPastMonths = true;
 panel._state = {
   current_month: "2026-09",
+  available_months: ["2026-08", "2026-09", "2026-10"],
   settings: {
     currency: "EUR", locale: "en-GB", automatic_savings_enabled: false,
     plan_item_order: { income: [], expense: ["Zulu", "Alpha"] },
@@ -131,6 +132,9 @@ assert.match(matrix, /data-original-name="Zulu"/);
 assert.match(matrix, /aria-label="Reorder Zulu"/);
 assert.match(matrix, /mdi:drag-horizontal-variant/);
 assert.match(matrix, /data-action="open-plan-month" data-month="2026-09"/);
+assert.match(matrix, />September<\/button>/);
+assert.match(matrix, /class="matrix-group-heading"/);
+assert.doesNotMatch(matrix, /Open savings|Forecast remaining|Target funding gap/);
 assert.doesNotMatch(matrix, /data-action="open-month"/);
 assert.doesNotMatch(panel._renderYear(), /class="month-(card|grid)"/);
 assert.match(panel._recurrenceLabel({ recurrence: "custom", recurrence_interval: 3 }), /every 3 months · no end date/);
@@ -142,6 +146,36 @@ panel._month = null;
 panel._matrixEditMode = false;
 assert.doesNotMatch(panel._renderYearMatrix(), /<td[^>]+data-action=/);
 panel._matrixEditMode = true;
+panel._stickyFirstColumn = false;
+assert.match(panel._renderYearMatrix(), /class="matrix-group-label"/);
+panel._stickyFirstColumn = true;
+
+panel._state.settings.automatic_savings_enabled = true;
+panel._state.months["2026-09"].summary = {
+  expected_income: 1000, unpaid_expenses: 500, planned_savings: 0,
+  remaining: 1200, daily_allowance: 40, daily_target_shortfall: 150,
+  days_divisor: 30, rag: "yellow", incomplete: false,
+};
+const smartMatrix = panel._renderYearMatrix();
+assert.match(smartMatrix, /Target funding gap/);
+assert.doesNotMatch(smartMatrix, /Open savings|Forecast remaining/);
+const smartMonth = panel._renderMonth({
+  month: "2026-09", account_balance: 1200, items: [],
+  summary: panel._state.months["2026-09"].summary,
+});
+assert.match(smartMonth, />Savings</);
+assert.match(smartMonth, />Remaining</);
+assert.match(smartMonth, /Target funding gap/);
+assert.doesNotMatch(smartMonth, /Forecast remaining|Open savings/);
+panel._state.settings.automatic_savings_enabled = false;
+
+panel._month = "2026-09";
+const monthHeader = panel._renderHeader();
+assert.match(monthHeader, /data-action="open-existing-month" data-month="2026-08"/);
+assert.match(monthHeader, /data-action="open-existing-month" data-month="2026-10"/);
+assert.match(monthHeader, /Previous month: August 2026/);
+assert.match(monthHeader, /Next month: October 2026/);
+panel._month = null;
 
 const renameCalls = [];
 const renamedPlanState = {
@@ -222,6 +256,7 @@ assert.doesNotMatch(styles, /\.care-periods\s*\{[^}]*max-height/);
 assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);
 assert.match(styles, /\.matrix-group-label\s*\{[^}]*position:relative[^}]*translateX\(var\(--matrix-scroll-x,0px\)\)/);
+assert.match(styles, /\.sticky-first-column \.matrix \.matrix-group-heading\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.matrix-section\s*\{[^}]*width:calc\(100% \+ 24px\)/);
 assert.match(styles, /\.item-main\s*\{[^}]*grid-column:2; grid-row:1/);
 assert.doesNotMatch(styles, /\.more-button/);
@@ -264,18 +299,40 @@ let billRequest;
 panel._hass.callWS = async request => { billRequest = request; };
 await billSubmit(new Map([["total","234.56"],["kwh","1000.5"],["fixed_fees","26.96"],["enabled","on"]]));
 assert.deepEqual(billRequest, {type:"budget_manager/electricity",action:"bill",document:{payment_month:"2026-09",item_id:"electric",total:234.56,kwh:1000.5,fixed_fees:26.96,enabled:true}});
+
+let deleteMonthDialog, deleteMonthSubmit;
+panel._openModal = (title, fields, submitLabel, callback, extraButtons, submitClass) => {
+  deleteMonthDialog = {title, fields, submitLabel, extraButtons, submitClass};
+  deleteMonthSubmit = callback;
+};
+panel._month = "2026-09";
+panel._deleteMonth();
+assert.equal(deleteMonthDialog.title, "Delete month?");
+assert.equal(deleteMonthDialog.submitLabel, "Delete month");
+assert.equal(deleteMonthDialog.submitClass, "danger-primary");
+assert.match(deleteMonthDialog.fields, /September 2026 will be permanently deleted/);
+let deleteMonthRequest;
+panel._hass.callWS = async request => { deleteMonthRequest = request; };
+await deleteMonthSubmit();
+assert.deepEqual(deleteMonthRequest, {type:"budget_manager/delete_month",month:"2026-09"});
+assert.equal(panel._month, null);
+
 assert.equal(panel._canRecordElectricityBill("2026-09"), false);
 assert.equal(panel._canRecordElectricityBill("2026-08"), true);
 const eligibleElectricityRow = panel._renderItem(electricItem, "expense");
 assert.match(eligibleElectricityRow, /mdi:pencil/);
-assert.match(eligibleElectricityRow, /Record actual bill/);
+assert.doesNotMatch(eligibleElectricityRow, /Record actual bill|Add actual bill/);
 assert.doesNotMatch(eligibleElectricityRow, /•••/);
-const unavailableElectricityRow = panel._renderItem({
+const eligibleElectricityEditor = panel._electricityBillEditorHtml(electricItem);
+assert.match(eligibleElectricityEditor, /id="open-electricity-bill"/);
+assert.match(eligibleElectricityEditor, /Add actual bill/);
+assert.doesNotMatch(eligibleElectricityEditor, /disabled/);
+const unavailableElectricityEditor = panel._electricityBillEditorHtml({
   ...electricItem,
   electricity: {...electricItem.electricity, consumption_month:"2026-09"},
-}, "expense");
-assert.match(unavailableElectricityRow, /Actual bill after Sep ends/);
-assert.match(unavailableElectricityRow, /disabled/);
+});
+assert.match(unavailableElectricityEditor, /available after September 2026 ends/);
+assert.match(unavailableElectricityEditor, /disabled/);
 const feeHtml = panel._electricityFeeRow();
 assert.match(feeHtml, /No start limit/);
 assert.match(feeHtml, /No end limit/);
