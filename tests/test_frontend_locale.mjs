@@ -136,7 +136,12 @@ assert.match(matrix, />September<\/button>/);
 assert.match(matrix, /class="matrix-group-heading"/);
 assert.doesNotMatch(matrix, /Open savings|Forecast remaining|Target funding gap/);
 assert.doesNotMatch(matrix, /data-action="open-month"/);
-assert.doesNotMatch(panel._renderYear(), /class="month-(card|grid)"/);
+const planView = panel._renderYear();
+assert.doesNotMatch(planView, /class="month-(card|grid)"|class="year-toolbar"/);
+assert.match(planView, /class="matrix-wrap">\s*<div class="plan-table-controls">/);
+for (const action of ["prev-year", "next-year", "choose-year", "create-month", "create-year", "toggle-past-months", "toggle-matrix-edit"]) {
+  assert.ok(planView.indexOf(`data-action="${action}"`) < planView.indexOf('<table class="matrix"'));
+}
 assert.match(panel._recurrenceLabel({ recurrence: "custom", recurrence_interval: 3 }), /every 3 months · no end date/);
 await panel._handleAction({ currentTarget: {
   dataset: { action: "open-plan-month", month: "2026-09" },
@@ -257,6 +262,8 @@ assert.doesNotMatch(styles, /\.care-periods-head\s*\{[^}]*position:sticky/);
 assert.match(styles, /\.care-period-list\s*\{[^}]*flex-direction:column/);
 assert.match(styles, /\.matrix-group-label\s*\{[^}]*position:relative[^}]*translateX\(var\(--matrix-scroll-x,0px\)\)/);
 assert.match(styles, /\.sticky-first-column \.matrix \.matrix-group-heading\s*\{[^}]*position:sticky/);
+assert.match(styles, /\.plan-table-controls\s*\{[^}]*position:sticky[^}]*left:0/);
+assert.match(styles, /\.matrix-wrap\s*\{[^}]*max-height:calc\(100dvh - 120px\)[^}]*touch-action:pan-x pan-y/);
 assert.match(styles, /\.matrix-section\s*\{[^}]*width:calc\(100% \+ 24px\)/);
 assert.match(styles, /\.item-main\s*\{[^}]*grid-column:2; grid-row:1/);
 assert.doesNotMatch(styles, /\.more-button/);

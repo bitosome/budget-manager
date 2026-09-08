@@ -8,7 +8,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 
 ## Features
 
-- Table-only plan view; select a month heading to open its budget (or create it if missing).
+- Table-only plan view with year navigation, creation, filtering and edit controls in one scroll surface; select a month heading to open its budget (or create it if missing).
 - Grouped 24-month planning matrix showing the selected year followed by the next year, with explicit year headers.
 - A per-device **Hide past months** toggle shortens the plan table to the current month and future months without removing any budget data.
 - A visible toggle in the plan table's `Item` header pins or unpins the first column per device; mobile defaults to unpinned for easier horizontal scrolling.
