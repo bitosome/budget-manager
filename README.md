@@ -83,8 +83,8 @@ Add an expenditure and choose **Child-care sick leave**. Link it to an income th
 
 For each period Budget Manager:
 
-- deducts salary hours only for Monday–Friday scheduled workdays, excluding Estonian public holidays and respecting shortened workdays;
-- counts all calendar days in the estimated care benefit, so a weekend-only period adds an estimated Tervisekassa income without reducing salary;
+- deducts salary hours for Monday–Friday scheduled workdays by default, excluding Estonian public holidays and respecting shortened workdays. Enable **Include weekends** in a period’s editor to count weekends as working days for that period;
+- counts all calendar days in the estimated care benefit, so a weekend-only period adds an estimated Tervisekassa income without reducing salary when **Include weekends** is off (the default);
 - recalculates the linked net salary; and
 - creates a separate, status-trackable estimated Tervisekassa income in the salary-payment month.
 

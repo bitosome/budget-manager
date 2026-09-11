@@ -210,6 +210,30 @@ class BudgetModelTests(unittest.TestCase):
         self.assertEqual(result["estimated_net_benefit"], 124.8)
         self.assertEqual(result["benefit_basis_mode"], "actual_previous_year_income")
 
+    def test_care_leave_weekend_option_changes_only_salary_hours(self) -> None:
+        for include_weekends, expected_hours in ((False, 8), (True, 24)):
+            with self.subTest(include_weekends=include_weekends):
+                period = care_leave.normalize_care_period({
+                    "start": "2026-09-04", "end": "2026-09-06",
+                    "include_weekends": include_weekends,
+                })
+                self.assertEqual(period["include_weekends"], include_weekends)
+                result = care_leave.calculate_care_period(
+                    period, hourly_gross=14, previous_year_working_hours=0,
+                    benefit_basis_mode="actual_previous_year_income",
+                    actual_previous_year_income=36500,
+                    public_holidays=[], shortened_workdays=[], benefit_year=2026,
+                )
+                self.assertEqual(result["missed_working_hours"], expected_hours)
+                self.assertEqual(result["estimated_gross_salary_reduction"], expected_hours * 14)
+                self.assertEqual(result["estimated_net_benefit"], 187.2)
+
+    def test_care_period_weekend_option_defaults_off_and_requires_boolean(self) -> None:
+        period = {"start": "2026-09-05", "end": "2026-09-06"}
+        self.assertFalse(care_leave.normalize_care_period(period)["include_weekends"])
+        with self.assertRaises(care_leave.EstonianCareLeaveError):
+            care_leave.normalize_care_period({**period, "include_weekends": "false"})
+
     def test_hourly_care_benefit_basis_is_clearly_an_estimate(self) -> None:
         result = care_leave.calculate_care_period(
             {"id": "weekday", "start": "2026-09-07", "end": "2026-09-07"},
@@ -1243,6 +1267,23 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(benefits), 1)
         self.assertEqual(benefits[0]["amount"], 124.8)
         self.assertEqual(benefits[0]["name"], "Tervisekassa care benefit")
+
+        for include_weekends in (True, False):
+            updated = await self.manager.async_upsert_care_leave_period(
+                "2026-09", care_item["id"],
+                {**weekend, "include_weekends": include_weekends},
+            )
+            self.assertEqual(updated["include_weekends"], include_weekends)
+            october_items = self.manager.data["months"]["2026-10"]["items"]
+            adjusted_salary = next(item for item in october_items if item["id"] == salary["id"])
+            self.assertEqual(adjusted_salary["income_calculation"]["care_leave_hours"], 16 if include_weekends else 0)
+            if include_weekends:
+                self.assertLess(adjusted_salary["amount"], baseline_salary)
+            else:
+                self.assertEqual(adjusted_salary["amount"], baseline_salary)
+            benefits = [item for item in october_items if item.get("generated_type")]
+            self.assertEqual(len(benefits), 1)
+            self.assertEqual(benefits[0]["amount"], 124.8)
 
         weekday = await self.manager.async_upsert_care_leave_period(
             "2026-09",

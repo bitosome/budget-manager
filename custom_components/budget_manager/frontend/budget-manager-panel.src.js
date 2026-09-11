@@ -1791,6 +1791,8 @@ class BudgetManagerPanel extends HTMLElement {
         <legend id="care-period-form-title">Add period</legend>
         <input type="hidden" id="care-period-id">
         <div class="two-col">${this._field("Start date", "care_period_start", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}${this._field("End date", "care_period_end", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}</div>
+        <label class="check"><input type="checkbox" name="care_period_include_weekends"><span>Include weekends</span></label>
+        <p class="form-help">Count weekends as working days when calculating missed salary hours. Public holidays remain excluded. The estimated care benefit still counts all calendar days.</p>
         <div class="inline-actions"><button type="button" class="quiet" id="cancel-care-period">Cancel</button><button type="button" class="primary" id="save-care-period">Save period</button></div>
       </fieldset>`;
     const modal = this._openModal("Child-care sick leave", fields, "Save settings", async (form) => {
@@ -1830,9 +1832,11 @@ class BudgetManagerPanel extends HTMLElement {
     const periodId = modal.root.querySelector("#care-period-id");
     const periodStart = modal.root.querySelector('[name="care_period_start"]');
     const periodEnd = modal.root.querySelector('[name="care_period_end"]');
+    const periodIncludeWeekends = modal.root.querySelector('[name="care_period_include_weekends"]');
     const openPeriodForm = (period = null) => {
       periodForm.hidden = false;
       periodId.value = period?.id || "";
+      periodIncludeWeekends.checked = period?.include_weekends === true;
       periodStart.value = period?.start || bounds.min;
       periodEnd.value = period?.end || period?.start || bounds.min;
       modal.root.querySelector("#care-period-form-title").textContent = period ? "Edit period" : "Add period";
@@ -1847,7 +1851,7 @@ class BudgetManagerPanel extends HTMLElement {
     modal.root.querySelector("#save-care-period").onclick = async () => {
       try {
         if (!periodStart.value || !periodEnd.value) throw new Error("Select both the start and end dates.");
-        const savedPeriod = await this._hass.callWS({ type: "budget_manager/upsert_care_leave_period", month: this._month, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value } });
+        const savedPeriod = await this._hass.callWS({ type: "budget_manager/upsert_care_leave_period", month: this._month, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value, include_weekends: periodIncludeWeekends.checked } });
         modal.close();
         await this._load(this._year);
         const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);

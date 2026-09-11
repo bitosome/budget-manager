@@ -67,10 +67,14 @@ def normalize_care_period(raw: Any, *, existing_id: str | None = None) -> dict[s
         raise EstonianCareLeaveError(
             f"One child-care leave period cannot exceed {CARE_BENEFIT_MAX_DAYS} days"
         )
+    include_weekends = raw.get("include_weekends", False)
+    if not isinstance(include_weekends, bool):
+        raise EstonianCareLeaveError("Include weekends must be a boolean")
     normalized = {
         "id": str(existing_id or raw.get("id") or ""),
         "start": start.isoformat(),
         "end": end.isoformat(),
+        "include_weekends": include_weekends,
         "calculation": None,
     }
     calculation = raw.get("calculation")
@@ -178,7 +182,9 @@ def calculate_care_period(
     holidays = {date.fromisoformat(value) for value in public_holidays}
     shortened = {date.fromisoformat(value) for value in shortened_workdays}
     working_dates = [
-        value for value in dates if value.weekday() < 5 and value not in holidays
+        value for value in dates
+        if (value.weekday() < 5 or normalized["include_weekends"])
+        and value not in holidays
     ]
     missed_hours = sum(
         (Decimal("5") if value in shortened else Decimal("8") for value in working_dates),
