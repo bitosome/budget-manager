@@ -27,7 +27,7 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Calendar-style save confirmation: change only this occurrence or this and following occurrences. Completed future payments are preserved; shared names still update across all months.
 - Manage categories in **Budget → Settings**; choose a category from a dropdown when editing an item.
 - Mark expenses paid and income received without automatically changing the manual account balance.
-- Checking or reopening income, expenditures, and savings keeps each row in its month-view position. Completed items show a checkmark and muted styling; paid amounts in the plan table are crossed out without an extra tick.
+- Checking or reopening income, expenditures, and savings keeps each row in its month-view position and preserves the current scroll position and checkbox focus during refresh. Completed items show a checkmark and muted styling; paid amounts in the plan table are crossed out without an extra tick.
 - Optional assignment to a Home Assistant user with an active Companion App notification device. Assigned items require a due day and send targeted reminders from the chosen time every hour until completion or the end of that day, while calendar entries remain all-day events.
 - Concise signed calendar titles such as `Apple iCloud -€9.99` and `Валя +€1873.24`.
 - Create a blank month or copy any specific month.

@@ -384,3 +384,77 @@ panel._hass.callWS=async()=>{throw new Error("Recorder unavailable")};
 await panel._runElectricityAction(actionModal,"refresh");
 assert.equal(actionStatus.textContent,"Failed: Recorder unavailable");
 assert.ok(actionButtons.every(button=>!button.disabled));
+
+
+// Checkbox refreshes preserve HA's nested scroller, including its async render.
+const scrollPanel = new Panel();
+scrollPanel._month = "2026-09";
+scrollPanel._year = 2026;
+scrollPanel._defaultViewApplied = true;
+scrollPanel._bindEvents = () => {};
+const scrollItem = {id: "scroll-item", name: "Water", kind: "expense", amount: 25, status: "pending"};
+const scrollState = {
+  selected_year: 2026, current_month: "2026-09", settings: {},
+  months: {"2026-09": {month: "2026-09", account_balance: 100, summary: {}, items: [scrollItem]}},
+};
+scrollPanel._state = structuredClone(scrollState);
+const scrollCalls = [];
+scrollPanel._hass = {callWS: async (message) => {
+  scrollCalls.push(message);
+  if (message.type === "budget_manager/set_item_status") {
+    scrollState.months["2026-09"].items[0].status = message.status;
+    return;
+  }
+  return structuredClone(scrollState);
+}};
+let scroller = {scrollTop: 850, scrollLeft: 0};
+let bar = {scrollTarget: scroller};
+let activeButton = {dataset: {action: "toggle-status", id: "scroll-item"}};
+let renderedHtml = "";
+const restoredPositions = [];
+const restoredFocus = [];
+globalThis.CSS = {escape: value => value};
+scrollPanel.shadowRoot = {
+  get activeElement() { return activeButton; },
+  querySelector(selector) {
+    if (selector === "ha-top-app-bar-fixed") return bar;
+    if (selector.includes('data-id="scroll-item"')) return {
+      focus(options) {
+        restoredFocus.push(options);
+        activeButton = {dataset: {action: "toggle-status", id: "scroll-item"}};
+      },
+    };
+    return null;
+  },
+  set innerHTML(value) {
+    renderedHtml = value;
+    activeButton = null;
+    scroller = {
+      scrollTop: 0, scrollLeft: 0,
+      scrollTo({top, left}) {
+        this.scrollTop = top;
+        this.scrollLeft = left;
+        restoredPositions.push(top);
+      },
+    };
+    const nextBar = {};
+    nextBar.updateComplete = Promise.resolve().then(() => { nextBar.scrollTarget = scroller; });
+    bar = nextBar;
+  },
+};
+for (const expectedStatus of ["paid", "pending"]) {
+  await scrollPanel._toggleStatus("scroll-item", "expense");
+  assert.equal(scroller.scrollTop, 850, "Checkbox clicks must not scroll to the top");
+  assert.equal(scrollPanel._state.months["2026-09"].items[0].status, expectedStatus);
+  assert.equal(/status-button done/.test(renderedHtml), expectedStatus === "paid");
+}
+assert.deepEqual(restoredPositions, [850, 850, 850, 850], "Keep position during loading and after the response");
+assert.equal(restoredFocus.length, 4);
+assert.ok(restoredFocus.every(options => options.preventScroll === true));
+assert.deepEqual(scrollCalls.map(message => message.type), [
+  "budget_manager/set_item_status", "budget_manager/get_state",
+  "budget_manager/set_item_status", "budget_manager/get_state",
+]);
+// Explicit navigation must still start at the top, not inherit the previous view.
+await scrollPanel._render();
+assert.equal(scroller.scrollTop, 0);

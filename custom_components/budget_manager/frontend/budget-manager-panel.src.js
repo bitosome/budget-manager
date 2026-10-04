@@ -139,11 +139,11 @@ class BudgetManagerPanel extends HTMLElement {
     if (!this._loading) this._load(currentYear);
   }
 
-  async _load(year = this._year) {
+  async _load(year = this._year, { preserveScroll = false } = {}) {
     if (!this._hass || this._loading) return;
     this._loading = true;
     this._error = null;
-    this._render();
+    await this._render({ preserveScroll });
     try {
       const [state, assignees] = await Promise.all([
         this._hass.callWS({ type: "budget_manager/get_state", year }),
@@ -172,7 +172,7 @@ class BudgetManagerPanel extends HTMLElement {
       this._error = err?.message || String(err);
     } finally {
       this._loading = false;
-      this._render();
+      await this._render({ preserveScroll });
       const current = this._state?.current_month;
       if (this._currentMonthRequested && current && !this._state.months[current]) {
         const currentYear = Number(current.slice(0, 4));
@@ -328,8 +328,19 @@ class BudgetManagerPanel extends HTMLElement {
     return `${previousYear}-${String(previousMonth).padStart(2, "0")}`;
   }
 
-  _render() {
+  _render({ preserveScroll = false } = {}) {
     if (!this.shadowRoot) return;
+    // HA owns the scroller inside its app bar, not on the panel or window.
+    const scrollTarget = preserveScroll
+      ? this.shadowRoot.querySelector("ha-top-app-bar-fixed")?.scrollTarget
+      : null;
+    const scrollPosition = scrollTarget ? {
+      top: scrollTarget.scrollTop ?? scrollTarget.scrollY ?? 0,
+      left: scrollTarget.scrollLeft ?? scrollTarget.scrollX ?? 0,
+    } : null;
+    const activeElement = preserveScroll ? this.shadowRoot.activeElement : null;
+    const focusedItem = activeElement?.dataset?.action === "toggle-status"
+      ? activeElement.dataset.id : null;
     this._destroyPlanSortable();
     const body = this._error
       ? `<div class="empty error">${this._esc(this._error)}</div>`
@@ -350,6 +361,19 @@ class BudgetManagerPanel extends HTMLElement {
         <div id="toast" role="status"></div>
       </div>`;
     this._bindEvents();
+    if (scrollPosition) {
+      const appBar = this.shadowRoot.querySelector("ha-top-app-bar-fixed");
+      // Lit creates the replacement scroll target asynchronously. Restore before
+      // the next paint, and ignore a render superseded by navigation.
+      return Promise.resolve(appBar.updateComplete).then(() => {
+        if (this.shadowRoot.querySelector("ha-top-app-bar-fixed") !== appBar) return;
+        appBar.scrollTarget?.scrollTo({ ...scrollPosition, behavior: "instant" });
+        if (focusedItem) {
+          this.shadowRoot.querySelector(`[data-action="toggle-status"][data-id="${CSS.escape(focusedItem)}"]`)
+            ?.focus({ preventScroll: true });
+        }
+      });
+    }
   }
 
   _renderHeader() {
@@ -1896,7 +1920,7 @@ class BudgetManagerPanel extends HTMLElement {
     const status = complete ? "pending" : kind === "income" ? "received" : "paid";
     try {
       await this._hass.callWS({ type: "budget_manager/set_item_status", month: this._month, item_id: itemId, status });
-      await this._load(this._year);
+      await this._load(this._year, { preserveScroll: true });
     } catch (err) { this._showError(err); }
   }
 
