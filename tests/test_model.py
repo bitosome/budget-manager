@@ -1702,7 +1702,7 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2026-09", snapshot["months"])
         self.assertIn("2027-01", snapshot["months"])
 
-    async def test_snapshot_places_checked_items_after_open_items(self) -> None:
+    async def test_snapshot_keeps_checked_items_in_their_original_order(self) -> None:
         month = self.manager.data["months"]["2026-09"]
         month["items"] = [
             model.normalize_item(
@@ -1746,8 +1746,40 @@ class BudgetManagerTests(unittest.IsolatedAsyncioTestCase):
         items = self.manager.snapshot(2026)["months"]["2026-09"]["items"]
         self.assertEqual(
             [item["name"] for item in items],
-            ["Open second", "Received first", "Open second expense", "Paid first"],
+            ["Received first", "Open second", "Paid first", "Open second expense"],
         )
+
+    async def test_checking_and_unchecking_keeps_month_item_positions(self) -> None:
+        month = self.manager.data["months"]["2026-09"]
+        for kind, completed in (("expense", "paid"), ("income", "received"), ("savings", "paid")):
+            for custom_order in (False, True):
+                with self.subTest(kind=kind, custom_order=custom_order):
+                    month["items"] = [
+                        model.normalize_item({
+                            "name": name, "kind": kind, "amount": 10,
+                            "sort_order": index, "dynamic": False,
+                        })
+                        for index, name in enumerate(("Alpha", "Bravo", "Charlie"))
+                    ]
+                    if kind != "savings":
+                        self.manager.data["settings"]["plan_item_order"][kind] = (
+                            ["Charlie", "Alpha", "Bravo"] if custom_order else []
+                        )
+                    initial = self.manager.snapshot(2026)["months"]["2026-09"]["items"]
+                    expected_ids = [item["id"] for item in initial]
+                    for item_id, status in (
+                        (expected_ids[0], completed),
+                        (expected_ids[1], completed),
+                        (expected_ids[0], "pending"),
+                        (expected_ids[1], "pending"),
+                    ):
+                        await self.manager.async_set_item_status("2026-09", item_id, status)
+                        items = self.manager.snapshot(2026)["months"]["2026-09"]["items"]
+                        self.assertEqual([item["id"] for item in items], expected_ids)
+                        self.assertEqual(
+                            next(item["status"] for item in items if item["id"] == item_id),
+                            status,
+                        )
 
     async def test_month_notes_are_removed_during_migration(self) -> None:
         manager = manager_module.BudgetManager(object(), "old-note")

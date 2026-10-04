@@ -247,12 +247,12 @@ class BudgetManager:
                 len(kind_ranks),
             )
 
+        # Keep rows in place when checking or reopening an item.
         payload["items"].sort(
             key=lambda item: (
                 {"income": 0, "expense": 1, "savings": 2}.get(
                     item.get("kind"), 3
                 ),
-                item.get("status", STATUS_PENDING) != STATUS_PENDING,
                 item_plan_rank(item),
                 item.get("sort_order", 0),
                 item.get("due_day") or 0,
