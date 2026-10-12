@@ -328,3 +328,10 @@ python3 -m compileall -q custom_components tests
 ```
 
 Integration runtime testing requires a current Home Assistant development or test instance.
+
+## Integration icon
+
+Home Assistant 2026.3 and later displays the bundled integration icon from
+`custom_components/budget_manager/brand/`. The editable artwork and export
+instructions are in [branding/](branding/README.md). Earlier Home Assistant
+versions retain their usual fallback icon.
