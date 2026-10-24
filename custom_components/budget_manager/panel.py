@@ -23,7 +23,9 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     """Register frontend assets and the full-screen custom panel."""
     frontend_path = Path(__file__).parent / "frontend"
     panel_path = frontend_path / "budget-manager-panel.js"
-    panel_version = sha256(panel_path.read_bytes()).hexdigest()[:12]
+    panel_version = await hass.async_add_executor_job(
+        lambda: sha256(panel_path.read_bytes()).hexdigest()[:12]
+    )
     await hass.http.async_register_static_paths(
         [StaticPathConfig(STATIC_URL, str(frontend_path), False)]
     )
