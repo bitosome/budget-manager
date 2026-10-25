@@ -4,3 +4,7 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 node_modules/
+
+budget_manager.zip
+SHA256SUMS
+RELEASE_NOTES.md

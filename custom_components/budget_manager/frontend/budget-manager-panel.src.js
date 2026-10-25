@@ -1,9 +1,15 @@
 import Sortable from "sortablejs";
+import { panelStyles } from "./styles/panel.js";
+import { BudgetDialogs } from "./dialogs.js";
+import { familyStyles, dialogStyles, componentStyles, metricStyles, glowStyles, buildGlow, DESIGN_TOKENS_CSS } from "@bitosome/ha-card-ui";
 
 class BudgetManagerPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
+    this._dialogs = new BudgetDialogs(this);
+    this._pendingWrite = null;
+    this._dialogOpener = null;
     this._state = null;
     this._assignees = [];
     this._year = new Date().getFullYear();
@@ -66,6 +72,7 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._dialogs.dispose();
     this._destroyPlanSortable();
     window.removeEventListener("location-changed", this._handleLocationChanged);
     window.removeEventListener("popstate", this._handleLocationChanged);
@@ -146,9 +153,9 @@ class BudgetManagerPanel extends HTMLElement {
     await this._render({ preserveScroll });
     try {
       const [state, assignees] = await Promise.all([
-        this._hass.callWS({ type: "budget_manager/get_state", year }),
+        this._callWS({ type: "budget_manager/get_state", year }),
         this._canEdit
-          ? this._hass.callWS({ type: "budget_manager/notification_assignees" }).catch(() => [])
+          ? this._callWS({ type: "budget_manager/notification_assignees" }).catch(() => [])
           : Promise.resolve([]),
       ]);
       this._state = state;
@@ -350,15 +357,14 @@ class BudgetManagerPanel extends HTMLElement {
           ? this._renderMonth(this._state.months[this._month])
           : this._renderYear();
 
-    this.shadowRoot.innerHTML = `
-      <style>${this._styles()}</style>
+    if (!this.shadowRoot.getElementById("panel-root")) this.shadowRoot.innerHTML = `
+      <style>${this._styles()}</style><div id="panel-root"></div><div id="modal-root"></div><div id="toast" role="status"></div>`;
+    this.shadowRoot.getElementById("panel-root").innerHTML = `
       <div class="app ${this._loading ? "is-loading" : ""} ${this._narrow ? "is-narrow" : ""}">
         <ha-top-app-bar-fixed ${this._narrow ? "narrow" : ""}>
           ${this._renderHeader()}
-          <main class="${this._month ? "month-view" : "plan-view"}">${body}</main>
+          <main class="${this._month ? "month-view" : "plan-view"}"><p class="pending-write" role="status" ${this._pendingWrite ? "" : "hidden"}>Saving budget changes…</p>${body}</main>
         </ha-top-app-bar-fixed>
-        <div id="modal-root"></div>
-        <div id="toast" role="status"></div>
       </div>`;
     this._bindEvents();
     if (scrollPosition) {
@@ -388,12 +394,12 @@ class BudgetManagerPanel extends HTMLElement {
         <small>${this._month ? this._monthLabel(this._month) : `Plan ${this._year}–${this._year + 1}`}</small>
       </div>
       <div slot="actionItems" class="header-actions ${this._month ? "month-header" : "plan-header"}">
-          ${previousMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${previousMonth}" title="Previous month: ${this._esc(this._monthLabel(previousMonth))}" aria-label="Previous month: ${this._esc(this._monthLabel(previousMonth))}">‹ <span>${this._esc(this._monthName(previousMonth))}</span></button>` : ""}
-          ${this._month ? `<button class="app-bar-button" data-action="back-year">← Plan</button>` : ""}
-          ${nextMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${nextMonth}" title="Next month: ${this._esc(this._monthLabel(nextMonth))}" aria-label="Next month: ${this._esc(this._monthLabel(nextMonth))}"><span>${this._esc(this._monthName(nextMonth))}</span> ›</button>` : ""}
-          ${this._canEdit ? `<button class="app-bar-button settings-action" data-action="settings">Settings</button>` : ""}
+          ${previousMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${previousMonth}" title="Previous month: ${this._esc(this._monthLabel(previousMonth))}" aria-label="Previous month: ${this._esc(this._monthLabel(previousMonth))}"><ha-icon icon="mdi:chevron-left" aria-hidden="true"></ha-icon><span>${this._esc(this._monthName(previousMonth))}</span></button>` : ""}
+          ${this._month ? `<button class="app-bar-button" data-action="back-year"><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon><span>Plan</span></button>` : ""}
+          ${nextMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${nextMonth}" title="Next month: ${this._esc(this._monthLabel(nextMonth))}" aria-label="Next month: ${this._esc(this._monthLabel(nextMonth))}"><span>${this._esc(this._monthName(nextMonth))}</span><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>` : ""}
+          ${this._canEdit ? `<button class="app-bar-button family-icon-button settings-action" data-action="settings" title="Budget settings" aria-label="Budget settings"><ha-icon icon="mdi:cog-outline" aria-hidden="true"></ha-icon></button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
-          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh">↻</button>
+          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh"><ha-icon icon="mdi:refresh" aria-hidden="true"></ha-icon></button>
       </div>`;
   }
 
@@ -402,7 +408,9 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _metric(label, value, tone = "") {
-    return `<article class="metric ${tone}"><span>${label}</span><strong>${this._money(value)}</strong></article>`;
+    const color = ["danger", "red", "expense"].includes(tone) ? "var(--red)" : ["yellow", "warning"].includes(tone) ? "var(--amber)" : tone === "savings" ? "var(--blue)" : "var(--green)";
+    const glow = buildGlow({ weak: `color-mix(in srgb, ${color} 10%, transparent)`, strong: `color-mix(in srgb, ${color} 18%, transparent)` }, "static", ["green", "yellow", "red"].includes(tone));
+    return `<div class="family-tile-wrap">${glow.style ? `<div class="glow-under" style="${this._esc(glow.style)}" aria-hidden="true"><div class="glow-overlay"></div></div>` : ""}<article class="metric family-metric family-tile-face ${tone}"><span>${label}</span><strong class="family-metric-value">${this._money(value)}</strong></article></div>`;
   }
 
   _renderMonthCard(month) {
@@ -442,14 +450,14 @@ class BudgetManagerPanel extends HTMLElement {
     const planControls = `<div class="plan-table-controls">
       <div class="plan-table-heading"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>
         <div class="year-switcher">
-          <button class="icon-button" data-action="prev-year" aria-label="Previous plan years">‹</button>
+          <button class="icon-button" data-action="prev-year" aria-label="Previous plan years"><ha-icon icon="mdi:chevron-left" aria-hidden="true"></ha-icon></button>
           <button class="year-button" data-action="choose-year">${this._year}–${this._year + 1}</button>
-          <button class="icon-button" data-action="next-year" aria-label="Next plan years">›</button>
+          <button class="icon-button" data-action="next-year" aria-label="Next plan years"><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>
         </div>
       </div>
       <div class="plan-table-actions">
         ${matrixActions}
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="quiet" data-action="create-month">＋ Month</button><button class="primary" data-action="create-year">Copy / create year</button></div>` : ""}
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="quiet" data-action="create-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button><button class="primary" data-action="create-year">Copy / create year</button></div>` : ""}
       </div>
     </div>`;
     const emptyPlan = !(this._state.available_months || []).length
@@ -590,10 +598,10 @@ class BudgetManagerPanel extends HTMLElement {
           <span class="eyebrow">Manual account balance</span>
           ${this._canEdit ? `<button class="balance-value" data-action="edit-balance">${this._money(month.account_balance)} <small>edit</small></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item">＋ Add item</button></div>` : ""}
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
       </section>
       ${summary.incomplete ? `<p class="form-help care-notice">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
-      <section class="metrics">
+      <section class="metrics family-metrics family-tile-group">
         ${this._metric("Expected income", summary.expected_income, "income")}
         ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
         ${this._metric("Savings", summary.planned_savings, "savings")}
@@ -653,7 +661,7 @@ class BudgetManagerPanel extends HTMLElement {
     const displayName = generatedPeriod ? `Tervisekassa care benefit · ${generatedPeriod}` : item.name;
     const electric = item.expense_type === "electricity" ? item.electricity : null;
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
-      <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}">${complete ? "✓" : ""}</button>
+      <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}" aria-label="${this._esc(actionLabel)}" aria-pressed="${complete}">${complete ? `<ha-icon icon="mdi:check" aria-hidden="true"></ha-icon>` : ""}</button>
       <div class="item-main">
         <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.automatic_savings ? `<span class="badge savings-badge">Calculated</span>` : item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Adjusted</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
@@ -779,14 +787,14 @@ class BudgetManagerPanel extends HTMLElement {
     input.disabled = true;
     try {
       if (!month) {
-        await this._hass.callWS({
+        await this._callWS({
           type: "budget_manager/create_month",
           target: monthKey,
           source: null,
           overwrite: false,
         });
       }
-      const saved = await this._hass.callWS({
+      const saved = await this._callWS({
         type: "budget_manager/upsert_item",
         month: monthKey,
         scope: "this",
@@ -812,7 +820,7 @@ class BudgetManagerPanel extends HTMLElement {
           needs_review: true,
         },
       });
-      const state = await this._hass.callWS({
+      const state = await this._callWS({
         type: "budget_manager/get_state",
         year: this._year,
       });
@@ -844,13 +852,13 @@ class BudgetManagerPanel extends HTMLElement {
     input.dataset.saving = "true";
     input.disabled = true;
     try {
-      const renamed = await this._hass.callWS({
+      const renamed = await this._callWS({
         type: "budget_manager/rename_plan_item",
         kind: input.dataset.kind,
         old_name: oldName,
         new_name: newName,
       });
-      const state = await this._hass.callWS({
+      const state = await this._callWS({
         type: "budget_manager/get_state",
         year: this._year,
       });
@@ -930,7 +938,7 @@ class BudgetManagerPanel extends HTMLElement {
     const handles = this._planRows(kind).map((row) => row.querySelector(".plan-drag-handle")).filter(Boolean);
     handles.forEach((handle) => { handle.disabled = true; });
     try {
-      const planItemOrder = await this._hass.callWS({
+      const planItemOrder = await this._callWS({
         type: "budget_manager/update_plan_item_order",
         kind,
         names: orderedNames,
@@ -1002,7 +1010,7 @@ class BudgetManagerPanel extends HTMLElement {
     <fieldset class="settings-group"><legend>Categories</legend>
       <p class="form-help">Rename a category to update its uses in all months. Removing a category leaves those items uncategorized.</p>
       <div id="category-list">${(settings.categories || []).map((name) => this._categoryEditorRow(name)).join("")}</div>
-      <button type="button" class="quiet" id="add-category">＋ Add category</button>
+      <button type="button" class="quiet" id="add-category"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add category</button>
     </fieldset>
     <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="quiet" id="export-json">Export JSON</button><button type="button" class="quiet" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`;
     const modal = this._openModal("Budget settings", fields, "Save settings", async (form) => {
@@ -1014,7 +1022,7 @@ class BudgetManagerPanel extends HTMLElement {
       if (yellow > green) throw new Error("Yellow threshold cannot exceed green threshold.");
       if (savingsFloor > savingsTarget) throw new Error("Savings floor cannot exceed savings target.");
       if (!Number.isInteger(cycleEndDay) || cycleEndDay < 1 || cycleEndDay > 31) throw new Error("Cycle end day must be a whole number from 1 to 31.");
-      await this._hass.callWS({
+      await this._callWS({
         type: "budget_manager/update_settings",
         changes: {
           categories: [...modal.root.querySelectorAll('[name="category-name"]')].map((input) => input.value.trim()),
@@ -1044,7 +1052,7 @@ class BudgetManagerPanel extends HTMLElement {
     const fileInput = modal.root.querySelector("#import-file");
     modal.root.querySelector("#import-json").onclick = () => fileInput.click();
     fileInput.onchange = async () => {
-      if (fileInput.files?.[0]) await this._importData(fileInput.files[0], modal.close);
+      if (fileInput.files?.[0]) await this._importData(fileInput.files[0], modal);
       fileInput.value = "";
     };
   }
@@ -1080,7 +1088,7 @@ class BudgetManagerPanel extends HTMLElement {
       <label class="check"><input type="checkbox" name="enabled" ${row?.enabled !== false ? "checked" : ""}><span>Use this month for model training</span></label>
       <p class="form-help">${this._state.settings.electricity?.learning_enabled === false ? "Automatic learning is paused. The bill will be saved; use Retrain now or resume learning to update forecasts." : "Saving retrains automatically when this month is eligible for the configured history window. Zero-consumption months cannot train the model."} Saving does not mark the expense paid or change your account balance.</p>`;
     this._openModal(row ? "Edit actual electricity bill" : "Add actual electricity bill", fields, "Save bill", async form => {
-      await this._hass.callWS({type:"budget_manager/electricity", action:"bill", document:{payment_month:paymentMonth,item_id:itemId,total:Number(form.get("total")),kwh:Number(form.get("kwh")),fixed_fees:Number(form.get("fixed_fees")),enabled:form.has("enabled")}});
+      await this._callWS({type:"budget_manager/electricity", action:"bill", document:{payment_month:paymentMonth,item_id:itemId,total:Number(form.get("total")),kwh:Number(form.get("kwh")),fixed_fees:Number(form.get("fixed_fees")),enabled:form.has("enabled")}});
     });
   }
 
@@ -1107,7 +1115,7 @@ class BudgetManagerPanel extends HTMLElement {
     status.setAttribute('aria-busy', 'true');
     buttons.forEach(button => button.disabled = true);
     try {
-      const result = await this._hass.callWS({type:"budget_manager/electricity",action});
+      const result = await this._callWS({type:"budget_manager/electricity",action});
       if (!result.electricity) throw new Error("Restart Home Assistant after updating Budget Manager to enable detailed training status.");
       this._state.electricity = result.electricity;
       const details = action === "refresh" ? result.electricity.refresh : result.electricity.training;
@@ -1120,6 +1128,7 @@ class BudgetManagerPanel extends HTMLElement {
       // Only the status region changes: preserve the form, focus and scroll position.
     } catch (err) {
       status.textContent = `Failed: ${err?.message || String(err)}`;
+      if (modal.isActive && !modal.isActive()) this._showError(err);
     } finally {
       status.setAttribute('aria-busy', 'false');
       buttons.forEach(button => button.disabled = false);
@@ -1134,7 +1143,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${sensorField("Accumulated grid cost statistic (EUR)", "cost_statistic_id", ["EUR", "€"])}
       ${sensorField("Grid consumption statistic (kWh)", "energy_statistic_id", ["kWh"])}
       ${sensorField("Real electricity price sensor (reference, optional)", "price_entity_id", ["€/kWh", "EUR/kWh"])}
-      <fieldset class="settings-group"><legend>Fixed monthly fees</legend><p class="form-help">Separate fees are added once per consumption month, not once per day. Date ranges let you schedule tariff changes.</p><div id="electricity-fees">${(config.fees || []).map(f => this._electricityFeeRow(f)).join("")}</div><button type="button" class="quiet" id="add-electricity-fee">＋ Add fee</button></fieldset>
+      <fieldset class="settings-group"><legend>Fixed monthly fees</legend><p class="form-help">Separate fees are added once per consumption month, not once per day. Date ranges let you schedule tariff changes.</p><div id="electricity-fees">${(config.fees || []).map(f => this._electricityFeeRow(f)).join("")}</div><button type="button" class="quiet" id="add-electricity-fee"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add fee</button></fieldset>
       <fieldset class="settings-group"><legend>Forecast and learning</legend>
       <label><span>Estimation method</span><select name="method"><option value="adaptive" ${config.method !== "recent_average" ? "selected" : ""}>Adaptive seasonal regression</option><option value="recent_average" ${config.method === "recent_average" ? "selected" : ""}>Recent weighted average</option></select></label>
       <label class="check"><input type="checkbox" name="learning_enabled" ${config.learning_enabled !== false ? "checked" : ""}><span>Learn automatically from completed months</span></label>
@@ -1148,11 +1157,11 @@ class BudgetManagerPanel extends HTMLElement {
       for (const key of ["buffer_percent", "live_price_weight", "history_months", "half_life_months", "fallback_monthly_kwh", "fallback_price"]) electricity[key] = Number(form.get(key));
       electricity.learning_enabled = form.has("learning_enabled");
       electricity.fees = [...modal.root.querySelectorAll(".electricity-fee")].map(row => {
-        const bound = name => { const input = row.querySelector(`[name="${name}"]`); return input.disabled ? null : input.value || null; };
+        const bound = name => { const input = row.querySelector(`[name="${name}"]`); return row.querySelector(`[data-fee-bound="${name}"]`).value === "unlimited" ? null : input.value || null; };
         return {name:row.querySelector('[name="fee-name"]').value,amount:Number(row.querySelector('[name="fee-amount"]').value),from_month:bound("fee-from"),to_month:bound("fee-to")};
       });
-      await this._hass.callWS({type:"budget_manager/update_settings",changes:{electricity}});
-      await this._hass.callWS({type:"budget_manager/electricity",action:"refresh"});
+      await this._callWS({type:"budget_manager/update_settings",changes:{electricity}});
+      await this._callWS({type:"budget_manager/electricity",action:"refresh"});
     });
     modal.root.querySelector("#add-electricity-fee").onclick = () => modal.root.querySelector("#electricity-fees").insertAdjacentHTML("beforeend",this._electricityFeeRow());
     modal.root.querySelector("#electricity-fees").onclick = event => event.target.closest('[data-remove-fee]')?.closest('.electricity-fee').remove();
@@ -1170,14 +1179,8 @@ class BudgetManagerPanel extends HTMLElement {
     };
     this._initElectricityPickers(modal.root);
     modal.root.querySelector("#electricity-history").onclick = () => this._openElectricityHistory();
-    const closeSettings = () => { modal.close(); this._load(this._year); };
-    modal.root.querySelector('#modal-close').onclick = closeSettings;
-    modal.root.querySelector('#modal-cancel').onclick = closeSettings;
-    modal.root.querySelector('.modal-backdrop').onclick = event => {
-      if (event.target.classList.contains('modal-backdrop')) closeSettings();
-    };
     modal.root.querySelectorAll('[data-electricity-action]').forEach(button => button.onclick = async () => {
-      if (button.dataset.electricityAction === "reset" && !window.confirm("Reset the learned model and pause learning? Historical bills are retained.")) return;
+      if (button.dataset.electricityAction === "reset" && !await this._confirm("Reset electricity model?", "Pause learning and clear the learned model? Historical bills are retained.", "Reset model")) return;
       await this._runElectricityAction(modal, button.dataset.electricityAction);
     });
   }
@@ -1219,6 +1222,7 @@ class BudgetManagerPanel extends HTMLElement {
         }
         picker.addEventListener("value-changed", event => {
           event.stopPropagation();
+          if (input.disabled) return;
           input.value = event.detail.value || "";
           picker.value = event.detail.value || undefined;
         });
@@ -1230,14 +1234,14 @@ class BudgetManagerPanel extends HTMLElement {
     }
   }
 
-  _openElectricityHistory(imported) {
+  _openElectricityHistory(imported, replace = false) {
     const state = this._state.electricity || {};
     const observations = Object.fromEntries(Object.entries(state.observations || {}).filter(([key]) => !(state.ignored_months || []).includes(key)));
     const records = imported || Object.values({...observations,...state.history}).sort((a,b)=>a.month.localeCompare(b.month));
     const rowHtml = row => `<div class="electricity-history-row settings-group"><div class="two-col">${this._field("Consumption month", "history-month", row.month || "", "month", "required")}${this._field("Consumption, kWh", "history-kwh", row.kwh ?? "", "number", "min=0 step=0.001 required")}${this._field("Variable grid cost incl. VAT, EUR", "history-cost", row.grid_cost ?? "", "number", "step=0.01 required")}${this._field("Billed fixed fees incl. VAT, EUR", "history-fees", row.fixed_fees ?? 0, "number", "min=0 step=0.01 required")}</div><label class="check"><input type="checkbox" name="history-enabled" ${row.enabled !== false ? "checked" : ""}><span>Use this month for training</span></label><input type="hidden" name="history-source" value="${this._esc(row.source || "manual")}"><button type="button" class="danger-button" data-remove-history>Remove month</button></div>`;
-    const modal = this._openModal("Electricity history", `<p class="form-help">Completed consumption months only. Variable grid cost is the full invoice total minus its fixed fees, including VAT. Combine supplier-change partial bills into one month. Uncheck outliers to exclude them from training while retaining their actual bill. Saving makes these rows the confirmed history; confirmed data takes priority over Recorder.</p><div class="data-actions"><button type="button" class="quiet" id="import-electricity-history">Import JSON</button><button type="button" class="quiet" id="export-electricity-history">Export JSON</button><input type="file" id="electricity-history-file" accept=".json,application/json" hidden><button type="button" class="quiet" id="add-electricity-month">＋ Month</button></div><div id="electricity-history-rows">${records.map(rowHtml).join("")}</div>`, "Save history", async () => {
-      await this._hass.callWS({type:"budget_manager/electricity",action:"history",document:getDocument()});
-    });
+    const modal = this._openModal("Electricity history", `<p class="form-help">Completed consumption months only. Variable grid cost is the full invoice total minus its fixed fees, including VAT. Combine supplier-change partial bills into one month. Uncheck outliers to exclude them from training while retaining their actual bill. Saving makes these rows the confirmed history; confirmed data takes priority over Recorder.</p><div class="data-actions"><button type="button" class="quiet" id="import-electricity-history">Import JSON</button><button type="button" class="quiet" id="export-electricity-history">Export JSON</button><input type="file" id="electricity-history-file" accept=".json,application/json" hidden><button type="button" class="quiet" id="add-electricity-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button></div><div id="electricity-history-rows">${records.map(rowHtml).join("")}</div>`, "Save history", async () => {
+      await this._callWS({type:"budget_manager/electricity",action:"history",document:getDocument()});
+    }, "", "primary", { replace });
     const getDocument = () => ({format:"budget-manager-electricity-history",version:1,records:[...modal.root.querySelectorAll('.electricity-history-row')].map(row=>({month:row.querySelector('[name="history-month"]').value,kwh:Number(row.querySelector('[name="history-kwh"]').value),grid_cost:Number(row.querySelector('[name="history-cost"]').value),fixed_fees:Number(row.querySelector('[name="history-fees"]').value),enabled:row.querySelector('[name="history-enabled"]').checked,source:row.querySelector('[name="history-source"]').value}))});
     modal.root.querySelector('#electricity-history-rows').onclick = event => event.target.closest('[data-remove-history]')?.closest('.electricity-history-row').remove();
     modal.root.querySelector('#add-electricity-month').onclick = () => modal.root.querySelector('#electricity-history-rows').insertAdjacentHTML('beforeend',rowHtml({}));
@@ -1246,7 +1250,19 @@ class BudgetManagerPanel extends HTMLElement {
     };
     const file=modal.root.querySelector('#electricity-history-file');
     modal.root.querySelector('#import-electricity-history').onclick=()=>file.click();
-    file.onchange=async()=>{try{if(!file.files?.[0])return;if(file.files[0].size>2*1024*1024)throw new Error('History file exceeds 2 MB');const data=JSON.parse(await file.files[0].text());if(data.format!=='budget-manager-electricity-history'||data.version!==1||!Array.isArray(data.records)||data.records.length>1200)throw new Error('Not an electricity history file');if(!window.confirm('Replace the history editor with this file? Review it, then Save history to apply.'))return;this._openElectricityHistory(data.records);}catch(err){this._showError(err);}};
+    file.onchange = async () => {
+      const generation = this._dialogs.flow.generation;
+      try {
+        if (!file.files?.[0]) return;
+        if (file.files[0].size > 2 * 1024 * 1024) throw new Error("History file exceeds 2 MB");
+        const data = JSON.parse(await file.files[0].text());
+        if (!modal.isActive() || !this._dialogs.flow.isCurrent(generation)) return;
+        if (data.format !== "budget-manager-electricity-history" || data.version !== 1 || !Array.isArray(data.records) || data.records.length > 1200) throw new Error("Not an electricity history file");
+        if (!await this._confirm("Replace history draft?", "Replace these editor rows with the selected file? Review them before saving.", "Replace draft")) return;
+        if (modal.isActive()) this._openElectricityHistory(data.records, true);
+      } catch (err) { if (modal.isActive()) this._showError(err); }
+      finally { file.value = ""; }
+    };
   }
 
   _recurrenceLabel(item) {
@@ -1256,36 +1272,18 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _chooseEditScope() {
-    return new Promise((resolve) => {
-      const overlay = document.createElement("div");
-      overlay.className = "modal-backdrop scope-backdrop";
-      overlay.innerHTML = `<div class="modal scope-dialog" role="dialog" aria-modal="true" aria-label="Save changes"><div class="modal-head"><h2>Save changes</h2></div><div class="modal-body"><p>Where should these changes apply?</p><button type="button" class="quiet" data-scope="this">Only this occurrence</button><button type="button" class="primary" data-scope="future">This and following occurrences</button><p class="form-help">Completed future entries are preserved. Shared name changes apply to all months.</p></div><div class="modal-actions"><button type="button" class="quiet" data-scope="cancel">Back to editing</button></div></div>`;
-      const root = this.shadowRoot.getElementById("modal-root");
-      const form = root.querySelector("form");
-      const previousFocus = this.shadowRoot.activeElement;
-      form.inert = true;
-      const finish = (scope) => { overlay.remove(); form.inert = false; previousFocus?.focus(); resolve(scope); };
-      overlay.onclick = (event) => {
-        const choice = event.target.closest("[data-scope]")?.dataset.scope;
-        if (choice) finish(choice === "cancel" ? null : choice);
-      };
-      overlay.onkeydown = (event) => {
-        if (event.key === "Escape") { event.preventDefault(); finish(null); }
-        if (event.key === "Tab") {
-          const buttons = [...overlay.querySelectorAll("button")];
-          const index = buttons.indexOf(this.shadowRoot.activeElement);
-          event.preventDefault();
-          buttons[(index + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length].focus();
-        }
-      };
-      root.append(overlay);
-      overlay.querySelector("button").focus();
-    });
+    return this._dialogs.choose("Save changes", "Choose where these changes apply. Completed future entries are preserved. Shared name changes apply to all months.", [
+      { value: "this", label: "Only this occurrence" }, { value: "future", label: "This and following occurrences" },
+    ]);
+  }
+
+  async _confirm(title, description, label) {
+    return await this._dialogs.choose(title, description, [{ value: "confirm", label, destructive: true }]) === "confirm";
   }
 
   async _exportData() {
     try {
-      const data = await this._hass.callWS({ type: "budget_manager/export_data" });
+      const data = await this._callWS({ type: "budget_manager/export_data" });
       const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1302,13 +1300,18 @@ class BudgetManagerPanel extends HTMLElement {
     }
   }
 
-  async _importData(file, closeModal) {
+  async _importData(file, modal) {
+    const generation = this._dialogs.flow.generation;
+    let dispatched = false;
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error("Import file cannot exceed 10 MB.");
       const document = JSON.parse(await file.text());
-      if (!window.confirm("Importing replaces all existing budget months and settings. Continue?")) return;
-      await this._hass.callWS({ type: "budget_manager/import_data", document });
-      closeModal();
+      if (!modal.isActive() || !this._dialogs.flow.isCurrent(generation)) return;
+      if (!await this._confirm("Replace budget?", "Importing replaces all existing budget months and settings. Export a backup first if you need to retain them.", "Import and replace")) return;
+      if (!modal.isActive()) return;
+      dispatched = true;
+      await this._callWS({ type: "budget_manager/import_data", document });
+      modal.close();
       this._month = null;
       this._year = this._currentDateParts().year;
       this._defaultViewApplied = false;
@@ -1316,32 +1319,45 @@ class BudgetManagerPanel extends HTMLElement {
       await this._load(this._year);
       this._showMessage("Budget imported successfully.");
     } catch (err) {
-      this._showError(err instanceof SyntaxError ? new Error("The selected file is not valid JSON.") : err);
+      if (dispatched || modal.isActive()) this._showError(err instanceof SyntaxError ? new Error("The selected file is not valid JSON.") : err);
     }
   }
 
-  _openModal(title, fields, submitLabel, onSubmit, extraButtons = "", submitClass = "primary") {
-    const root = this.shadowRoot.getElementById("modal-root");
-    root.innerHTML = `<div class="modal-backdrop"><form class="modal" id="modal-form">
-      <div class="modal-head"><h2>${title}</h2><button type="button" class="close" id="modal-close" aria-label="Close" title="Close"></button></div>
-      <div class="modal-body">${fields}</div>
-      <div class="modal-actions">${extraButtons}<button type="button" class="quiet" id="modal-cancel">Cancel</button><button class="${submitClass}" type="submit">${submitLabel}</button></div>
-    </form></div>`;
-    const close = () => { root.innerHTML = ""; };
-    root.querySelector("#modal-close").onclick = close;
-    root.querySelector("#modal-cancel").onclick = close;
-    root.querySelector(".modal-backdrop").onclick = (event) => { if (event.target.classList.contains("modal-backdrop")) close(); };
-    root.querySelector("#modal-form").onsubmit = async (event) => {
-      event.preventDefault();
-      try {
-        if (await onSubmit(new FormData(event.currentTarget)) === false) return;
-        close();
-        await this._load(this._year);
-      } catch (err) {
-        this._showError(err);
-      }
-    };
-    return { root, close };
+  _openModal(title, fields, submitLabel, onSubmit, extraButtons = "", submitClass = "primary", options = {}) {
+    return this._dialogs.open(title, fields, submitLabel, onSubmit, extraButtons, submitClass, options);
+  }
+
+  _captureDialogFocus() {
+    const element = this.shadowRoot.activeElement;
+    if (!element || element.closest("dialog")) return;
+    this._dialogOpener = { element, action: element.dataset.action, id: element.dataset.id };
+  }
+
+  _restoreDialogFocus() {
+    queueMicrotask(() => {
+      if (this._dialogs.flow.active) return;
+      const saved = this._dialogOpener;
+      const target = saved?.element?.isConnected ? saved.element : saved?.action ?
+        [...this.shadowRoot.querySelectorAll('[data-action]')].find(element => element.dataset.action === saved.action && (!saved.id || element.dataset.id === saved.id)) : null;
+      (target || this.shadowRoot.querySelector('[data-action="settings"]'))?.focus({ preventScroll: true });
+    });
+  }
+
+  async _callWS(message) {
+    const read = ["get_state", "notification_assignees", "export_data", "estonian_working_hours"].some(action => message.type === `budget_manager/${action}`);
+    if (read) return this._hass.callWS(message);
+    if (this._pendingWrite) throw new Error("A budget change is still being saved. Wait before making another change.");
+    const operation = {};
+    this._pendingWrite = operation;
+    this._dialogs.pending(true);
+    this.shadowRoot.querySelector?.('.pending-write')?.removeAttribute('hidden');
+    const payload = structuredClone(message);
+    try { return await this._hass.callWS(payload); }
+    finally {
+      if (this._pendingWrite === operation) this._pendingWrite = null;
+      this._dialogs.pending(false);
+      this.shadowRoot.querySelector?.('.pending-write')?.setAttribute('hidden', '');
+    }
   }
 
   _field(label, name, value = "", type = "text", attrs = "") {
@@ -1362,7 +1378,7 @@ class BudgetManagerPanel extends HTMLElement {
       <label><span>Copy from</span><select name="source"><option value="">Blank month</option>${sources.map((key) => `<option value="${key}">${this._monthLabel(key)}</option>`).join("")}</select></label>
       <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite target if it exists</span></label>`;
     this._openModal("Create month", fields, "Create month", async (form) => {
-      await this._hass.callWS({ type: "budget_manager/create_month", target: form.get("target"), source: form.get("source") || null, overwrite: form.has("overwrite") });
+      await this._callWS({ type: "budget_manager/create_month", target: form.get("target"), source: form.get("source") || null, overwrite: form.has("overwrite") });
     });
   }
 
@@ -1373,17 +1389,18 @@ class BudgetManagerPanel extends HTMLElement {
       <label class="check"><input type="checkbox" name="overwrite"><span>Overwrite existing target months</span></label>`;
     this._openModal("Create full year", fields, "Create year", async (form) => {
       const targetYear = Number(form.get("target_year"));
-      await this._hass.callWS({ type: "budget_manager/create_year", target_year: targetYear, source_year: form.get("source_year") ? Number(form.get("source_year")) : null, overwrite: form.has("overwrite") });
+      await this._callWS({ type: "budget_manager/create_year", target_year: targetYear, source_year: form.get("source_year") ? Number(form.get("source_year")) : null, overwrite: form.has("overwrite") });
       this._month = null;
       this._year = targetYear;
     });
   }
 
   _openBalanceEditor() {
-    const month = this._state.months[this._month];
+    const monthKey = this._month;
+    const month = this._state.months[monthKey];
     const fields = this._field("Account balance", "account_balance", month.account_balance, "number", "min=0 step=0.01 required");
     this._openModal("Manual account balance", fields, "Save balance", async (form) => {
-      await this._hass.callWS({ type: "budget_manager/update_month", month: this._month, changes: { account_balance: Number(form.get("account_balance")) } });
+      await this._callWS({ type: "budget_manager/update_month", month: monthKey, changes: { account_balance: Number(form.get("account_balance")) } });
     });
   }
 
@@ -1412,7 +1429,8 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _openItemEditor(itemId = null) {
-    const month = this._state.months[this._month];
+    const monthKey = this._month;
+    const month = this._state.months[monthKey];
     const item = itemId ? month.items.find((entry) => entry.id === itemId) : null;
     if (item?.automatic_savings) return;
     if (item?.expense_type === "child_care_leave") return this._openCareLeaveEditor(item);
@@ -1422,7 +1440,7 @@ class BudgetManagerPanel extends HTMLElement {
     const fundedPensionRate = Number(incomeCalculation?.funded_pension_rate || 0);
     const fundedPensionIsJoined = incomeCalculation?.funded_pension_joined ?? (fundedPensionRate > 0);
     const workPeriod = incomeCalculation?.work_period || "budget_month";
-    const endDefault = `${Number(this._month.slice(0, 4)) + 1}-${this._month.slice(5)}-01`;
+    const endDefault = `${Number(monthKey.slice(0, 4)) + 1}-${monthKey.slice(5)}-01`;
     const careIncomeOptions = this._careIncomeOptions();
     const unavailableAssignee = item?.assignee_user_id && !this._assignees.some((user) => user.id === item.assignee_user_id)
       ? `<option value="${this._esc(item.assignee_user_id)}" selected>Unavailable user</option>`
@@ -1456,7 +1474,7 @@ class BudgetManagerPanel extends HTMLElement {
             ${this._field("Working hours", "working_hours", incomeCalculation?.working_hours ?? "", "number", "min=0.01 step=0.01")}
           </div>
           <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${automaticWorkingHours ? "checked" : ""}><span>Use Estonia's standard monthly working hours automatically</span></label>
-          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(this._month, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
+          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(monthKey, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
           <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${incomeCalculation?.apply_social_tax_minimum !== false ? "checked" : ""}><span>Apply the social-tax minimum monthly base (€886)</span></label>
           <div class="tax-free-setting">
             <label class="check"><input type="checkbox" name="apply_tax_free_income" ${incomeCalculation?.apply_tax_free_income !== false ? "checked" : ""}><span>Apply tax-free income</span></label>
@@ -1517,9 +1535,9 @@ class BudgetManagerPanel extends HTMLElement {
       if (isCareLeave && basisMode === "actual_previous_year_income" && (!Number.isFinite(actualPreviousYearIncome) || actualPreviousYearIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
       const scope = item && !isCareLeave ? await this._chooseEditScope() : "this";
       if (!scope) return false;
-      await this._hass.callWS({
+      await this._callWS({
         type: "budget_manager/upsert_item",
-        month: this._month,
+        month: monthKey,
         scope,
         item: {
           ...(item || {}),
@@ -1535,7 +1553,7 @@ class BudgetManagerPanel extends HTMLElement {
             linked_income_item_id: careLink[1],
             linked_income_series_id: linkedIncome?.series_id || "",
             linked_income_name: linkedIncome?.name || "",
-            work_month: this._month,
+            work_month: monthKey,
             income_month: careLink[0],
             periods: [],
             benefit_basis_mode: basisMode,
@@ -1548,7 +1566,7 @@ class BudgetManagerPanel extends HTMLElement {
             work_period: form.get("work_period"),
             working_hours: workingHours,
             working_days: Number(modal.root.querySelector("#working-hours-status").dataset.workingDays || 0),
-            working_time_month: modal.root.querySelector("#working-hours-status").dataset.workingTimeMonth || this._incomeWorkingMonth(this._month, form.get("work_period")),
+            working_time_month: modal.root.querySelector("#working-hours-status").dataset.workingTimeMonth || this._incomeWorkingMonth(monthKey, form.get("work_period")),
             calendar_source: modal.root.querySelector("#working-hours-status").dataset.calendarSource || (form.has("automatic_working_hours") ? "pending" : "manual"),
             apply_social_tax_minimum: form.has("apply_social_tax_minimum"),
             apply_tax_free_income: form.has("apply_tax_free_income"),
@@ -1568,7 +1586,6 @@ class BudgetManagerPanel extends HTMLElement {
     const electricityBillEditor = modal.root.querySelector("#electricity-bill-editor");
     if (electricityBillButton && !electricityBillButton.disabled) {
       electricityBillButton.onclick = () => {
-        modal.close();
         this._openElectricityBill(item.id);
       };
     }
@@ -1627,7 +1644,7 @@ class BudgetManagerPanel extends HTMLElement {
     assigneeSelect.onchange = updateAssignment;
     workingHoursStatus.dataset.workingDays = String(incomeCalculation?.working_days || 0);
     workingHoursStatus.dataset.calendarSource = incomeCalculation?.calendar_source || (automaticWorkingHours ? "pending" : "manual");
-    workingHoursStatus.dataset.workingTimeMonth = incomeCalculation?.working_time_month || this._incomeWorkingMonth(this._month, workPeriod);
+    workingHoursStatus.dataset.workingTimeMonth = incomeCalculation?.working_time_month || this._incomeWorkingMonth(monthKey, workPeriod);
     const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
     const updatePayrollPreview = () => {
       if (kindSelect.value !== "income" || !estonianHourly.checked) return;
@@ -1668,8 +1685,8 @@ class BudgetManagerPanel extends HTMLElement {
       refreshWorkingHours.disabled = true;
       workingHoursStatus.textContent = "Loading Estonia working hours…";
       try {
-        const workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
-        const result = await this._hass.callWS({ type: "budget_manager/estonian_working_hours", month: workingTimeMonth });
+        const workingTimeMonth = this._incomeWorkingMonth(monthKey, workPeriodSelect.value);
+        const result = await this._callWS({ type: "budget_manager/estonian_working_hours", month: workingTimeMonth });
         workingHoursInput.value = Number(result.working_hours).toFixed(2);
         workingHoursStatus.dataset.workingDays = String(result.working_days);
         workingHoursStatus.dataset.calendarSource = result.calendar_source;
@@ -1759,7 +1776,7 @@ class BudgetManagerPanel extends HTMLElement {
       else workingHoursStatus.textContent = "Manual working hours";
     };
     workPeriodSelect.onchange = () => {
-      workingHoursStatus.dataset.workingTimeMonth = this._incomeWorkingMonth(this._month, workPeriodSelect.value);
+      workingHoursStatus.dataset.workingTimeMonth = this._incomeWorkingMonth(monthKey, workPeriodSelect.value);
       if (automaticHours.checked) loadWorkingHours();
       else workingHoursStatus.textContent = `${this._monthLabel(workingHoursStatus.dataset.workingTimeMonth)} · manual working hours`;
     };
@@ -1779,9 +1796,13 @@ class BudgetManagerPanel extends HTMLElement {
     });
     updateKind();
     if (item) modal.root.querySelector("#delete-item").onclick = async () => {
-      const scope = item.series_id && window.confirm("Delete this and all future unpaid occurrences?\n\nOK = future series, Cancel = only this occurrence") ? "future" : "this";
+      const scope = await this._dialogs.choose("Delete item?", "Choose which unpaid occurrences to remove. This cannot be undone.", [
+        { value: "this", label: "Delete this occurrence", destructive: true },
+        ...(item.series_id ? [{ value: "future", label: "Delete this and future unpaid occurrences", destructive: true }] : []),
+      ]);
+      if (!scope) return;
       try {
-        await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope });
+        await this._callWS({ type: "budget_manager/delete_item", month: monthKey, item_id: item.id, scope });
         modal.close();
         await this._load(this._year);
       } catch (err) { this._showError(err); }
@@ -1789,10 +1810,11 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _openCareLeaveEditor(item) {
+    const monthKey = this._month;
     const care = item.care_leave || {};
-    const incomeOptions = this._careIncomeOptions(care.work_month || this._month);
+    const incomeOptions = this._careIncomeOptions(care.work_month || monthKey);
     const selectedLink = this._careIncomeOptionValue(care.income_month, care.linked_income_item_id);
-    const bounds = this._careMonthBounds(care.work_month || this._month);
+    const bounds = this._careMonthBounds(care.work_month || monthKey);
     const periods = care.periods || [];
     const basisMode = care.benefit_basis_mode || "estimated_hourly";
     const periodRows = periods.length ? periods.map((period) => {
@@ -1810,7 +1832,7 @@ class BudgetManagerPanel extends HTMLElement {
       <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${basisMode === "estimated_hourly" ? "selected" : ""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${basisMode === "actual_previous_year_income" ? "selected" : ""}>Use actual previous-year social-taxable income</option></select></label>
       <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(care.actual_previous_year_income || "")}"></label>
       <p class="form-help" id="care-editor-basis-help"></p>
-      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period">＋ Add period</button></div><div class="care-period-list">${periodRows}</div></section>
+      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add period</button></div><div class="care-period-list">${periodRows}</div></section>
       <fieldset class="settings-group" id="care-period-form" hidden>
         <legend id="care-period-form-title">Add period</legend>
         <input type="hidden" id="care-period-id">
@@ -1826,12 +1848,12 @@ class BudgetManagerPanel extends HTMLElement {
       const selectedBasis = String(form.get("benefit_basis_mode"));
       const actualIncome = Number(form.get("actual_previous_year_income") || 0);
       if (selectedBasis === "actual_previous_year_income" && (!Number.isFinite(actualIncome) || actualIncome <= 0)) throw new Error("Enter the previous calendar year's total social-taxable income.");
-      await this._hass.callWS({
-        type: "budget_manager/upsert_item", month: this._month, scope: "this",
+      await this._callWS({
+        type: "budget_manager/upsert_item", month: monthKey, scope: "this",
         item: { ...item, name: form.get("name"), expense_type: "child_care_leave", care_leave: {
           ...care,
           linked_income_item_id: link[1], linked_income_series_id: linkedIncome?.series_id || "", linked_income_name: linkedIncome?.name || "",
-          income_month: link[0], work_month: this._month, benefit_basis_mode: selectedBasis,
+          income_month: link[0], work_month: monthKey, benefit_basis_mode: selectedBasis,
           actual_previous_year_income: selectedBasis === "actual_previous_year_income" ? actualIncome : 0,
         } },
       });
@@ -1875,11 +1897,12 @@ class BudgetManagerPanel extends HTMLElement {
     modal.root.querySelector("#save-care-period").onclick = async () => {
       try {
         if (!periodStart.value || !periodEnd.value) throw new Error("Select both the start and end dates.");
-        const savedPeriod = await this._hass.callWS({ type: "budget_manager/upsert_care_leave_period", month: this._month, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value, include_weekends: periodIncludeWeekends.checked } });
+        const savedPeriod = await this._callWS({ type: "budget_manager/upsert_care_leave_period", month: monthKey, item_id: item.id, period: { id: periodId.value || undefined, start: periodStart.value, end: periodEnd.value, include_weekends: periodIncludeWeekends.checked } });
+        const reopen = modal.isActive();
         modal.close();
         await this._load(this._year);
-        const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
-        if (refreshed) {
+        const refreshed = this._state.months[monthKey]?.items.find((entry) => entry.id === item.id);
+        if (reopen && refreshed && !this._dialogs.flow.active) {
           this._carePeriodToReveal = savedPeriod.id;
           this._openCareLeaveEditor(refreshed);
         }
@@ -1887,20 +1910,21 @@ class BudgetManagerPanel extends HTMLElement {
     };
     modal.root.querySelectorAll(".delete-care-period").forEach((button) => {
       button.onclick = async () => {
-        if (!window.confirm("Remove this care-leave period and its generated Tervisekassa income?")) return;
+        if (!await this._confirm("Delete care-leave period?", "Remove this period and its generated Tervisekassa income?", "Delete period")) return;
         try {
-          await this._hass.callWS({ type: "budget_manager/delete_care_leave_period", month: this._month, item_id: item.id, period_id: button.dataset.periodId });
+          await this._callWS({ type: "budget_manager/delete_care_leave_period", month: monthKey, item_id: item.id, period_id: button.dataset.periodId });
+          const reopen = modal.isActive();
           modal.close();
           await this._load(this._year);
-          const refreshed = this._state.months[this._month]?.items.find((entry) => entry.id === item.id);
-          if (refreshed) this._openCareLeaveEditor(refreshed);
+          const refreshed = this._state.months[monthKey]?.items.find((entry) => entry.id === item.id);
+          if (reopen && refreshed && !this._dialogs.flow.active) this._openCareLeaveEditor(refreshed);
         } catch (err) { this._showError(err); }
       };
     });
     modal.root.querySelector("#delete-care-item").onclick = async () => {
-      if (!window.confirm("Delete this care-leave item, restore the salary estimate, and remove its generated Tervisekassa income?")) return;
+      if (!await this._confirm("Delete care-leave item?", "This restores the salary estimate and removes its generated Tervisekassa income.", "Delete item")) return;
       try {
-        await this._hass.callWS({ type: "budget_manager/delete_item", month: this._month, item_id: item.id, scope: "this" });
+        await this._callWS({ type: "budget_manager/delete_item", month: monthKey, item_id: item.id, scope: "this" });
         modal.close();
         await this._load(this._year);
       } catch (err) { this._showError(err); }
@@ -1919,7 +1943,7 @@ class BudgetManagerPanel extends HTMLElement {
     const complete = item.status === "paid" || item.status === "received";
     const status = complete ? "pending" : kind === "income" ? "received" : "paid";
     try {
-      await this._hass.callWS({ type: "budget_manager/set_item_status", month: this._month, item_id: itemId, status });
+      await this._callWS({ type: "budget_manager/set_item_status", month: this._month, item_id: itemId, status });
       await this._load(this._year, { preserveScroll: true });
     } catch (err) { this._showError(err); }
   }
@@ -1932,7 +1956,7 @@ class BudgetManagerPanel extends HTMLElement {
       `<div class="delete-month-warning" role="alert"><strong>${this._esc(monthLabel)} will be permanently deleted.</strong><p>This removes the month and every income, expenditure, savings entry, and status stored in it. This action cannot be undone.</p></div>`,
       "Delete month",
       async () => {
-      await this._hass.callWS({ type: "budget_manager/delete_month", month: monthKey });
+      await this._callWS({ type: "budget_manager/delete_month", month: monthKey });
       this._month = null;
       },
       "",
@@ -1941,6 +1965,7 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _showError(err) {
+    if (this._dialogs.reportError(err)) return;
     this._showToast(err?.message || String(err), false);
   }
 
@@ -1957,43 +1982,7 @@ class BudgetManagerPanel extends HTMLElement {
     setTimeout(() => toast.classList.remove("show"), 5000);
   }
 
-  _styles() {
-    return `
-      :host { --ink: var(--primary-text-color, #18211d); --muted: var(--secondary-text-color, #6d7872); --surface: var(--card-background-color, #fff); --page: var(--primary-background-color, #f4f6f3); --line: rgba(100,120,108,.18); --green: #34785a; --green-soft: #dceee3; --blue: #3976a8; --red: #a64a42; --amber: #a36d00; display:block; height:100vh; height:100dvh; overflow:hidden; color:var(--ink); background:var(--page); font-family:var(--paper-font-body1_-_font-family, system-ui, sans-serif); }
-      * { box-sizing:border-box; } [hidden] { display:none !important; } button, input, select, textarea { font:inherit; } button { color:inherit; }
-      .app,ha-top-app-bar-fixed { height:100%; overflow:hidden; } .app.is-loading { cursor:progress; }
-      .native-title { min-width:0; display:grid; gap:2px; line-height:1.1; }.native-title strong,.native-title small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.native-title strong { font-size:17px; }.native-title small { font-size:11px; font-weight:400; opacity:.78; }
-      h1,h2,p { margin:0; } h1 { font-size:20px; line-height:1.1; } .section-title p, .updated { color:var(--muted); font-size:12px; margin-top:4px; }
-      .header-actions,.toolbar-actions { display:flex; align-items:center; gap:3px; }.app-bar-button { min-height:40px; padding:0 12px; border-radius:var(--ha-border-radius-button,10px); background:transparent; color:inherit; font-weight:650; }.app-bar-button:hover { background:rgba(255,255,255,.12); }.refresh-action { min-width:40px; padding:0; font-size:20px; }.read-only { padding:7px 10px; border-radius:999px; background:rgba(255,255,255,.14); color:inherit; font-size:12px; }
-      main { max-width:1500px; margin:0 auto; padding:28px clamp(16px,4vw,54px) 70px; }
-      button { border:0; cursor:pointer; }.quiet,.primary,.danger-button { border-radius:10px; padding:10px 14px; font-weight:650; }.quiet { background:var(--surface); border:1px solid var(--line); }.quiet:hover { border-color:var(--green); }.primary { background:var(--green); color:#fff; box-shadow:0 5px 14px rgba(52,120,90,.2); }.danger-button { color:var(--red); background:transparent; border:1px solid color-mix(in srgb, var(--red) 35%, transparent); }
-      .month-toolbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:22px; }.year-switcher { display:flex; align-items:center; gap:8px; }.icon-button,.year-button { height:42px; border-radius:12px; background:var(--surface); border:1px solid var(--line); }.icon-button { width:42px; flex:0 0 42px; font-size:24px; }.year-button { min-width:142px; padding:0 18px; font-size:17px; font-weight:750; }
-      .empty-plan { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px; border:1px dashed color-mix(in srgb,var(--green) 45%,var(--line)); background:var(--surface); }.empty-plan h2 { margin:5px 0; font-size:18px; }.empty-plan p { color:var(--muted); font-size:12px; }
-      .plan-table-controls { position:sticky; left:0; z-index:6; display:grid; gap:14px; width:100%; padding:18px 20px; border-bottom:1px solid var(--line); background:var(--surface); }.plan-table-heading,.plan-table-actions { display:flex; align-items:center; justify-content:space-between; gap:18px; }.plan-table-heading h2 { font-size:17px; }.plan-table-heading p { color:var(--muted); font-size:12px; margin-top:4px; }.matrix-title-actions,.toolbar-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }.matrix-edit-toggle.active,.past-months-toggle.active { color:var(--green); border-color:var(--green); background:var(--green-soft); }.matrix-empty-plan { position:sticky; left:0; z-index:5; width:100%; border-width:0 0 1px; }
-      .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:13px; margin-bottom:25px; }.metric { padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }.metric span { display:block; color:var(--muted); font-size:12px; margin-bottom:9px; }.metric strong { font-size:clamp(18px,2vw,26px); letter-spacing:-.03em; }.metric.income,.metric.good,.metric.green { border-top:3px solid var(--green); }.metric.expense,.metric.danger,.metric.red { border-top:3px solid var(--red); }.metric.warning,.metric.yellow { border-top:3px solid #d19a2e; }.metric.savings { border-top:3px solid #3976a8; }
-      .month-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:13px; margin-bottom:34px; }.month-card { text-align:left; min-height:170px; padding:18px; border-radius:16px; border:1px solid var(--line); background:var(--surface); transition:.16s ease; }.month-card:hover { transform:translateY(-2px); border-color:var(--green); box-shadow:0 10px 26px rgba(30,60,44,.08); }.month-card-title { display:flex; justify-content:space-between; font-weight:700; }.negative { color:var(--red); }.month-card dl { margin:20px 0 0; display:grid; gap:6px; }.month-card dl div { display:flex; justify-content:space-between; gap:12px; font-size:12px; }.month-card dt { color:var(--muted); }.month-card dd { margin:0; }.month-card-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:9px; margin-top:14px; padding-top:11px; border-top:1px solid var(--line); }.item-count { color:var(--muted); font-size:11px; }.rag-status { display:inline-block; padding:4px 8px; border-radius:999px; font-size:10px; font-weight:750; }.rag-status.green,.rag-cell.green { background:#d7eee1; color:#185d3d; }.rag-status.yellow,.rag-cell.yellow { background:#ffedbd; color:#765300; }.rag-status.red,.rag-cell.red { background:#f7d8d4; color:#8e312a; }.month-card.missing { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-style:dashed; color:var(--muted); }.missing .month-name { align-self:flex-start; color:var(--ink); }.missing .plus { font-size:28px; margin-top:auto; }.missing small { margin-bottom:auto; }
-      .matrix-section,.items-section { background:var(--surface); border:1px solid var(--line); border-radius:17px; overflow:hidden; margin-top:20px; }.plan-view .matrix-section { margin-top:0; }.section-title { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:19px 21px; border-bottom:1px solid var(--line); }.section-title h2 { font-size:17px; }.matrix-wrap { position:relative; overflow:auto; max-height:calc(100dvh - 120px); overscroll-behavior:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; }.matrix { border-collapse:separate; border-spacing:0; table-layout:fixed; width:100%; font-size:11px; }.matrix .item-column { width:205px; }.matrix th,.matrix td { padding:9px 6px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }.matrix thead th { position:sticky; top:0; z-index:2; background:color-mix(in srgb,var(--surface) 92%,var(--green-soft)); color:var(--muted); }.matrix thead .matrix-years th { top:0; background:color-mix(in srgb,var(--green-soft) 68%,var(--surface)); color:var(--ink); text-align:center; font-size:13px; font-weight:800; }.matrix thead .matrix-years + tr th { top:35px; }.matrix th:first-child { text-align:left; background:var(--surface); }.sticky-first-column .matrix th:first-child { position:sticky; left:0; z-index:3; }.sticky-first-column .matrix thead th:first-child { z-index:4; }.item-heading,.plan-row-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }.plan-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }.plan-row-label.editing { display:flex; flex:1 1 auto; align-items:center; overflow:visible; }.plan-row-label.editing .kind-dot { flex:0 0 7px; }.plan-name-input { width:100%; min-width:0; padding:6px 7px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); font-size:11px; font-weight:650; }.plan-name-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.plan-name-input:disabled { opacity:.55; cursor:progress; }.plan-drag-handle { display:inline-flex; flex:0 0 32px; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:var(--ha-border-radius-button,8px); background:transparent; color:var(--secondary-text-color,var(--muted)); cursor:grab; touch-action:none; -webkit-user-select:none; user-select:none; }.plan-drag-handle:hover,.plan-drag-handle:focus-visible,.plan-drag-handle.active { color:var(--primary-color,var(--green)); background:color-mix(in srgb,var(--primary-color,var(--green)) 12%,transparent); outline:none; }.plan-drag-handle:active,.plan-drag-handle.active { cursor:grabbing; }.plan-drag-handle ha-icon { --mdc-icon-size:22px; pointer-events:none; }.plan-sort-chosen,.plan-sort-drag,.plan-sort-fallback { -webkit-user-select:none !important; user-select:none !important; cursor:grabbing; }.plan-sort-chosen th,.plan-sort-chosen td { background:color-mix(in srgb,var(--primary-color,var(--green)) 16%,var(--surface)) !important; box-shadow:inset 0 2px 0 var(--primary-color,var(--green)),inset 0 -2px 0 var(--primary-color,var(--green)); }.plan-sort-ghost { opacity:.35; }.plan-sort-drag,.plan-sort-fallback { opacity:1 !important; background:var(--card-background-color,var(--surface)); box-shadow:0 4px 8px 3px #00000026; }.column-pin-toggle { display:inline-flex; align-items:center; gap:5px; padding:2px; border-radius:999px; background:transparent; color:var(--muted); font-size:9px; font-weight:700; }.column-pin-toggle:hover { color:var(--ink); }.toggle-track { position:relative; width:28px; height:16px; flex:0 0 auto; border-radius:999px; background:var(--line); transition:background .16s ease; }.toggle-thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .16s ease; }.column-pin-toggle.on .toggle-track { background:var(--green); }.column-pin-toggle.on .toggle-thumb { transform:translateX(12px); }.matrix td { cursor:pointer; }.matrix td:hover { outline:2px solid var(--green); outline-offset:-2px; }.matrix-edit-cell { padding:3px !important; background:color-mix(in srgb,var(--green-soft) 18%,var(--surface)); }.matrix-edit-cell.needs-review { background:color-mix(in srgb,#ffedbd 55%,var(--surface)); }.matrix-amount-input { width:100%; min-width:0; padding:6px 4px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--surface); text-align:right; font-size:11px; }.matrix-amount-input:focus { border-color:var(--green); box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 16%,transparent); }.matrix-amount-input:disabled { opacity:.55; cursor:progress; }.automatic-savings-cell { color:var(--blue); font-weight:700; cursor:default; }.matrix .blank { color:var(--muted); }.matrix .special { background:#fff3be; color:#624900; font-weight:700; }.matrix .complete { opacity:.58; text-decoration:line-through; }.matrix td small { display:block; font-size:9px; text-decoration:none; }.kind-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--red); }.income .kind-dot { background:var(--green); }.savings .kind-dot { background:#3976a8; }.matrix-group th { position:static !important; padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }.matrix-group-label { position:sticky; left:10px; display:inline-flex; align-items:center; width:max-content; max-width:calc(100vw - 42px); }.matrix-group.summary th { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; color:var(--ink); }.summary-row th,.summary-row td { font-weight:700; }.summary-row.savings td { color:#2d6798; }
-      .eyebrow { display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }.balance-value { margin-top:5px; padding:0; background:transparent; font-size:32px; font-weight:760; letter-spacing:-.04em; }.balance-value small { font-size:11px; color:var(--green); margin-left:7px; }.items-list { display:grid; }.item { min-height:70px; display:grid; grid-template-columns:36px minmax(0,1fr) auto 34px; gap:13px; align-items:center; padding:12px 17px; border-bottom:1px solid var(--line); }.item:last-child { border-bottom:0; }.item.needs-review { padding-left:14px; border-left:3px solid #d19a2e; background:color-mix(in srgb,#ffedbd 22%,var(--surface)); }.item.complete { opacity:.58; }.status-button { width:31px; height:31px; border:2px solid var(--line); border-radius:10px; background:transparent; color:white; font-weight:800; }.status-button.done { background:var(--green); border-color:var(--green); }.status-placeholder { width:31px; height:31px; display:block; }.item-main { min-width:0; }.item-title { font-weight:680; overflow-wrap:anywhere; }.item-meta { color:var(--muted); font-size:11px; line-height:1.4; margin-top:4px; overflow-wrap:anywhere; }.item-amount { font-size:16px; text-align:right; white-space:nowrap; }.item-amount small { display:block; margin-top:3px; color:var(--muted); font-size:9px; font-weight:500; }.edit-button { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; padding:0; border-radius:9px; background:transparent; color:var(--muted); }.edit-button:hover,.edit-button:focus-visible { background:var(--line); color:var(--ink); outline:none; }.edit-button ha-icon { --mdc-icon-size:19px; pointer-events:none; }.electricity-bill-button { display:inline-flex; align-items:center; gap:7px; margin-top:9px; padding:7px 10px; font-size:11px; }.electricity-bill-button ha-icon { --mdc-icon-size:17px; }.electricity-bill-button:disabled { opacity:.62; cursor:not-allowed; }.badge { display:inline-block; padding:3px 7px; margin-left:7px; border-radius:999px; background:#ffe894; color:#6e5100; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }.badge.review-badge { background:#ffedbd; color:#765300; }.badge.savings-badge { background:#dbeaf7; color:#245c88; }.badge.care-badge { background:#e2dcfa; color:#51418e; }.empty-row,.empty { padding:34px; text-align:center; color:var(--muted); }.empty.error { color:var(--red); }.danger-zone { display:flex; justify-content:flex-end; margin-top:26px; }
-      .form-help { color:var(--muted); line-height:1.55; }
-      .month-heading-button { background:transparent; color:var(--ink); font-weight:750; padding:7px 3px; width:100%; text-decoration:underline; text-underline-offset:4px; }
-      .matrix td { cursor:default; }.matrix td:hover { outline:none; }
-      .month-heading-button:hover { color:var(--primary-color,var(--green)); }
-      .scope-backdrop { z-index:1100; }.scope-dialog { max-width:460px; }.scope-dialog .modal-body { display:grid; gap:16px; }
-      .category-editor-row { display:flex; align-items:center; gap:10px; margin:10px 0; }.category-editor-row input { min-width:0; flex:1; }
-      .balance-value { display:block; }
-      .modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:18px; background:rgba(10,18,14,.54); backdrop-filter:blur(4px); }.modal { width:min(590px,100%); max-height:90vh; display:flex; flex-direction:column; background:var(--surface); border-radius:18px; box-shadow:0 30px 90px rgba(0,0,0,.3); overflow:hidden; }.modal-head,.modal-actions { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:17px 20px; border-bottom:1px solid var(--line); }.modal-head h2 { font-size:18px; }.close { position:relative; width:35px; height:35px; flex:0 0 35px; padding:0; border-radius:50%; background:var(--line); }.close::before,.close::after { content:""; position:absolute; top:50%; left:50%; width:17px; height:2px; border-radius:999px; background:currentColor; }.close::before { transform:translate(-50%,-50%) rotate(45deg); }.close::after { transform:translate(-50%,-50%) rotate(-45deg); }.modal-body { min-height:0; padding:20px; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; display:grid; gap:15px; }.modal-actions { border-top:1px solid var(--line); border-bottom:0; justify-content:flex-end; }.modal-actions .danger-button { margin-right:auto; }.modal label { display:grid; gap:7px; color:var(--muted); font-size:12px; }.modal input,.modal select,.modal textarea { width:100%; padding:11px 12px; color:var(--ink); background:var(--page); border:1px solid var(--line); border-radius:10px; outline:none; }.modal input:disabled { color:var(--muted); opacity:.72; cursor:not-allowed; }.modal input:focus,.modal select:focus,.modal textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 15%,transparent); }.two-col { display:grid; grid-template-columns:1fr 1fr; gap:13px; }.modal .check { display:flex; flex-direction:row; align-items:center; }.modal .check input { width:auto; }
-      .settings-group { min-width:0; display:grid; gap:11px; margin:0; padding:16px; border:1px solid var(--line); border-radius:14px; }.settings-group legend { padding:0 6px; font-size:13px; font-weight:750; }.settings-group .form-help { font-size:11px; }.data-settings { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px; border:1px solid var(--line); border-radius:14px; }.data-settings h3 { margin:0 0 5px; font-size:13px; }.data-settings .form-help { font-size:11px; }.data-actions { display:flex; flex:0 0 auto; gap:8px; }.care-periods { min-width:0; overflow:visible; border:1px solid var(--line); border-radius:14px; }.care-periods-head,.care-period { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:13px 15px; }.care-periods-head { background:var(--page); border-radius:13px 13px 0 0; }.care-periods-head > div,.care-period > div:first-child { min-width:0; display:grid; gap:4px; }.care-periods-head span,.care-period span { color:var(--muted); font-size:11px; line-height:1.4; }.care-period-count { display:inline-flex; align-items:center; justify-content:center; min-width:20px; min-height:20px; margin-left:5px; padding:1px 6px; border-radius:999px; background:var(--line); color:var(--ink) !important; font-size:10px !important; }.care-period-list { display:flex; min-width:0; flex-direction:column; }.care-period { flex:0 0 auto; border-top:1px solid var(--line); }.care-period-actions,.inline-actions { display:flex; flex:0 0 auto; justify-content:flex-end; gap:8px; }.care-period-actions .danger-button { padding:8px 10px; }.care-benefit-total { color:var(--blue); }
-      #estonian-payroll-fields { display:grid; gap:12px; margin-top:5px; }.calendar-source { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; }.calendar-source .quiet { flex:0 0 auto; padding:7px 10px; }.tax-free-setting { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.7fr); align-items:end; gap:12px; }.pension-rates { display:flex; flex-wrap:wrap; gap:10px; }.pension-rates label { display:flex; grid-template-columns:none; flex-direction:row; align-items:center; gap:5px; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--ink); }.pension-rates input { width:auto; margin:0; }.muted { opacity:.7; }.payroll-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:12px; border-radius:11px; background:color-mix(in srgb,var(--green-soft) 42%,var(--surface)); }.payroll-preview > span { grid-column:1/-1; color:var(--muted); font-size:11px; }.payroll-preview div { display:grid; gap:3px; }.payroll-preview span { color:var(--muted); font-size:10px; }.payroll-preview strong { font-size:14px; }
-      .review-notice { display:grid; gap:4px; padding:12px 14px; border:1px solid #d19a2e; border-radius:11px; background:color-mix(in srgb,#ffedbd 38%,var(--surface)); color:#765300; }.review-notice strong { font-size:12px; }.review-notice span { font-size:11px; line-height:1.45; }.review-notice.care-estimate-notice { border-color:color-mix(in srgb,var(--blue) 62%,var(--line)); background:color-mix(in srgb,var(--blue) 13%,var(--surface)); color:var(--ink); }.review-notice.care-estimate-notice span { color:var(--muted); }
-      #toast { position:fixed; right:20px; bottom:20px; z-index:200; max-width:420px; padding:13px 16px; border-radius:11px; background:#8d332d; color:white; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(calc(100% + 40px)); transition:transform .2s ease,opacity .2s ease,visibility 0s linear .2s; box-shadow:0 10px 30px rgba(0,0,0,.25); }#toast.success { background:var(--green); }#toast.show { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition-delay:0s; }
-      .matrix-group td { padding:7px 10px; background:color-mix(in srgb,var(--surface) 90%,var(--page)) !important; }.matrix-group.summary td { background:color-mix(in srgb,var(--green-soft) 55%,var(--surface)) !important; }.sticky-first-column .matrix .matrix-group-heading { position:sticky !important; left:0; z-index:3; overflow:hidden; text-overflow:ellipsis; }.month-nav-button { display:inline-flex; align-items:center; gap:5px; }.danger-primary { border-radius:10px; padding:10px 14px; background:var(--red); color:#fff; font-weight:700; }.delete-month-warning { padding:15px; border:1px solid color-mix(in srgb,var(--red) 48%,var(--line)); border-radius:12px; background:color-mix(in srgb,var(--red) 10%,var(--surface)); }.delete-month-warning strong { color:var(--red); }.delete-month-warning p { margin:8px 0 0; color:var(--muted); line-height:1.5; }
-      .app.is-narrow main { padding:18px 12px 50px; }.app.is-narrow .plan-view { padding-top:8px; }.app.is-narrow .plan-table-controls { gap:12px; padding:14px 12px; }.app.is-narrow .plan-table-heading,.app.is-narrow .plan-table-actions,.app.is-narrow .empty-plan { align-items:stretch; flex-direction:column; }.app.is-narrow .year-switcher { display:grid; grid-template-columns:42px minmax(0,1fr) 42px; }.app.is-narrow .year-button { width:100%; min-width:0; }.app.is-narrow .matrix-title-actions,.app.is-narrow .toolbar-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; }.app.is-narrow .matrix-title-actions button,.app.is-narrow .toolbar-actions button { min-width:0; }.app.is-narrow .matrix-section { width:calc(100% + 24px); margin-left:-12px; margin-right:-12px; border-left:0; border-right:0; border-radius:0; }
-      @media (max-width:1000px) { .month-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-      @media (max-width:700px) { h1 { font-size:17px; } main { padding:18px 12px 50px; }.month-toolbar,.empty-plan,.plan-table-heading,.plan-table-actions { align-items:stretch; flex-direction:column; }.plan-view { padding-top:8px; }.plan-table-controls { gap:12px; padding:14px 12px; }.year-switcher { display:grid; grid-template-columns:42px minmax(0,1fr) 42px; }.year-button { width:100%; min-width:0; }.matrix-title-actions,.toolbar-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; }.matrix-title-actions button,.toolbar-actions button { min-width:0; }.month-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }.metric { padding:14px; }.month-card { min-height:190px; padding:14px; }.item { grid-template-columns:34px minmax(0,1fr) 40px; column-gap:10px; row-gap:8px; align-items:start; padding:14px 12px; }.status-button,.status-placeholder { grid-column:1; grid-row:1 / span 2; }.item-main { grid-column:2; grid-row:1; }.edit-button { grid-column:3; grid-row:1; justify-self:end; width:40px; height:40px; }.item-amount { grid-column:2 / span 2; grid-row:2; justify-self:end; align-self:end; }.matrix-section { width:calc(100% + 24px); margin-left:-12px; margin-right:-12px; border-left:0; border-right:0; border-radius:0; }.matrix-group-label { left:8px; }.two-col,.tax-free-setting { grid-template-columns:1fr; }.section-title { flex-direction:column; }.data-settings { align-items:flex-start; flex-direction:column; }.data-actions { width:100%; }.data-actions button { flex:1; }.care-periods-head,.care-period { align-items:flex-start; flex-direction:column; }.care-period-actions { width:100%; }.care-period-actions button { flex:1; } }
-      @media (max-width:430px) { .month-grid { grid-template-columns:1fr; }.metrics { grid-template-columns:1fr 1fr; }.metric strong { font-size:17px; }.month-header .settings-action,.refresh-action { display:none; }.month-nav-button span { display:none; } }
-      .matrix-group-label { position:relative; left:auto; transform:translateX(var(--matrix-scroll-x,0px)); will-change:transform; }
-    `;
-  }
+  _styles() { return [DESIGN_TOKENS_CSS, familyStyles.cssText, dialogStyles.cssText, componentStyles.cssText, metricStyles.cssText, glowStyles.cssText, panelStyles].join("\n"); }
 }
 
 const PANEL_MODULE_VERSION = new URL(import.meta.url).searchParams.get("v") || "dev";

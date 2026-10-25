@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Budget Manager · synthetic preview</title>
+<style>
+:root{color-scheme:dark;--primary-text-color:#d5d9ef;--secondary-text-color:#afb7d3;--primary-background-color:#252738;--ha-card-background:#303445;--card-background-color:#303445;--primary-color:#c89ce6;--text-primary-color:#282134;--divider-color:#d6dbf018;--status-success-color:#66bd74;--status-warn-color:#daa257;--status-alert-color:#ef828b;--status-active-color:#49a9df;--ha-card-border-radius:24px;--ha-font-family-body:Arial,sans-serif;font-family:Arial,sans-serif;background:var(--primary-background-color);color:var(--primary-text-color)}
+:root[data-theme=light]{color-scheme:light;--primary-text-color:#24303d;--secondary-text-color:#627084;--primary-background-color:#f2f4f7;--ha-card-background:#fff;--primary-color:#77529d;--text-primary-color:#fff;--divider-color:#24303d20;--status-success-color:#3b8b42;--status-warn-color:#a86600;--status-alert-color:#c33147}
+body{margin:0}.preview-label{height:26px;box-sizing:border-box;padding:6px 12px;font-size:11px;opacity:.75}budget-manager-panel-dev{height:calc(100dvh - 26px)!important}button{font:inherit}
+</style><body><div class="preview-label">Synthetic preview · no Home Assistant connection</div>
+<script type="module">
+import {exampleState} from '/tests/fixtures.mjs';
+const params=new URLSearchParams(location.search);document.documentElement.dataset.theme=params.get('theme')||'dark';
+class PreviewIcon extends HTMLElement{
+ static get observedAttributes(){return['icon']}set icon(v){this.setAttribute('icon',v)}get icon(){return this.getAttribute('icon')}connectedCallback(){this.draw()}attributeChangedCallback(){this.draw()}
+ draw(){const paths={'mdi:close':'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12Z','mdi:arrow-left':'M20 11H7.83L13.42 5.41 12 4 4 12 12 20 13.42 18.59 7.83 13H20Z','mdi:plus':'M19 13H13V19H11V13H5V11H11V5H13V11H19Z','mdi:check':'M9 16.17 4.83 12 3.41 13.41 9 19 21 7 19.59 5.59Z','mdi:chevron-left':'M15.41 7.41 14 6 8 12 14 18 15.41 16.59 10.83 12Z','mdi:chevron-right':'M8.59 16.59 10 18 16 12 10 6 8.59 7.41 13.17 12Z','mdi:refresh':'M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.93 9h-2.02A6 6 0 1 1 16.24 7.76L13 11h9V2Z','mdi:pencil':'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25M20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75Z','mdi:cog-outline':'M19.14 12.94a7.8 7.8 0 0 0 0-1.88l2.03-1.58-1.92-3.32-2.39.96a7.9 7.9 0 0 0-1.63-.94L14.87 3h-3.84l-.36 3.18a7.9 7.9 0 0 0-1.63.94l-2.39-.96-1.92 3.32 2.03 1.58a7.8 7.8 0 0 0 0 1.88l-2.03 1.58 1.92 3.32 2.39-.96a7.9 7.9 0 0 0 1.63.94l.36 3.18h3.84l.36-3.18a7.9 7.9 0 0 0 1.63-.94l2.39.96 1.92-3.32-2.03-1.58M13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7'};this.innerHTML=`<svg viewBox="0 0 24 24" width="100%" height="100%" fill="currentColor" aria-hidden="true"><path d="${paths[this.icon]||paths['mdi:plus']}"/></svg>`}
+}
+customElements.define('ha-icon',PreviewIcon);
+customElements.define('ha-top-app-bar-fixed',class extends HTMLElement{
+ constructor(){super();this.attachShadow({mode:'open'});this.shadowRoot.innerHTML='<style>:host{display:flex;flex-direction:column;height:100%}header{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--divider-color)}main{min-height:0;overflow:auto;flex:1}</style><header><slot name="title"></slot><slot name="actionItems"></slot></header><main><slot></slot></main>';this.scrollTarget=this.shadowRoot.querySelector('main');this.updateComplete=Promise.resolve()}
+});
+await import('/custom_components/budget_manager/frontend/budget-manager-panel.js');
+const panel=document.createElement('budget-manager-panel-dev');panel._initialized=true;panel._defaultViewApplied=true;panel._year=2026;panel._month=params.has('plan')?null:'2026-09';panel._state=exampleState();
+panel._state.months['2026-09'].items.push({id:'example-salary',name:'Example salary',kind:'income',amount:2500,status:'received'},{id:'example-electricity',name:'Electricity',kind:'expense',amount:85,status:'pending',category:'Home'});
+panel._hass={user:{is_admin:true},locale:{language:'en'},config:{time_zone:'UTC'},callWS:async message=>{
+ if(message.type==='budget_manager/get_state')return structuredClone(panel._state);
+ if(message.type==='budget_manager/notification_assignees')return[];
+ if(message.type==='budget_manager/export_data')return{format:'budget-manager',version:1};
+ throw Error('Preview only — financial changes are not saved.');
+}};
+panel._load=async()=>panel._render({preserveScroll:true});panel.narrow=matchMedia('(max-width:700px)').matches;document.body.append(panel);
+window.previewPanel=panel;
+if(params.get('dialog')==='settings')panel._openSettings();
+</script></body></html>

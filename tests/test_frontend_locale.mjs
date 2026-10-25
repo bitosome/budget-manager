@@ -1,30 +1,8 @@
 import assert from "node:assert/strict";
 
-globalThis.window = {
-  localStorage: { getItem: () => null, setItem: () => {} },
-  matchMedia: () => ({ matches: false }),
-  navigator: { language: "en-GB" },
-  addEventListener: () => {},
-  removeEventListener: () => {},
-  location: { pathname: "/" },
-};
-globalThis.HTMLElement = class {
-  attachShadow() {
-    this.shadowRoot = {};
-  }
-};
-
-let Panel;
-globalThis.customElements = {
-  get: () => null,
-  define: (_name, constructor) => {
-    Panel = constructor;
-  },
-};
-
-await import(
-  `../custom_components/budget_manager/frontend/budget-manager-panel.js?locale-test=${Date.now()}`
-);
+import "./dom.mjs";
+await import("../custom_components/budget_manager/frontend/budget-manager-panel.js");
+const Panel = customElements.get("budget-manager-panel-dev");
 
 const panel = new Panel();
 panel._hass = {
@@ -414,7 +392,8 @@ let renderedHtml = "";
 const restoredPositions = [];
 const restoredFocus = [];
 globalThis.CSS = {escape: value => value};
-scrollPanel.shadowRoot = {
+const shadowDouble = {
+  getElementById(id) { return id === "panel-root" ? {set innerHTML(value) {shadowDouble.innerHTML = value;}} : null; },
   get activeElement() { return activeButton; },
   querySelector(selector) {
     if (selector === "ha-top-app-bar-fixed") return bar;
@@ -442,6 +421,7 @@ scrollPanel.shadowRoot = {
     bar = nextBar;
   },
 };
+Object.defineProperty(scrollPanel, "shadowRoot", {value: shadowDouble});
 for (const expectedStatus of ["paid", "pending"]) {
   await scrollPanel._toggleStatus("scroll-item", "expense");
   assert.equal(scroller.scrollTop, 850, "Checkbox clicks must not scroll to the top");

@@ -3,12 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild custom_components/budget_manager/frontend/budget-manager-panel.src.js --bundle --format=esm --minify --target=es2022 --legal-comments=eof --outfile=custom_components/budget_manager/frontend/budget-manager-panel.js"
+    "build": "esbuild custom_components/budget_manager/frontend/budget-manager-panel.src.js --bundle --format=esm --minify --target=es2022 --supported:template-literal=false --legal-comments=eof --outfile=custom_components/budget_manager/frontend/budget-manager-panel.js",
+    "test:frontend": "node tests/test_frontend_locale.mjs && node tests/test_frontend_flow.mjs",
+    "preview": "node tests/serve-preview.mjs"
   },
   "dependencies": {
+    "@bitosome/ha-card-ui": "https://github.com/bitosome/ha-card-ui/releases/download/v1.0.0/bitosome-ha-card-ui-1.0.0.tgz",
+    "lit": "3.3.1",
     "sortablejs": "1.15.6"
   },
   "devDependencies": {
-    "esbuild": "0.25.10"
+    "esbuild": "0.25.10",
+    "happy-dom": "21.0.4"
   }
 }

@@ -41,6 +41,14 @@ It provides a full-screen sidebar application, Home Assistant entities, payment-
 - Empty, zero-input installation with no bundled household or financial data.
 - Versioned JSON import and export from the Budget panel for backups and moving data between installations.
 
+## Shared interface
+
+The panel uses the same build-time `@bitosome/ha-card-ui` library as the household cards. It keeps its full-screen planning matrix and native Home Assistant sidebar architecture. Metric tiles use compact shared typography and semantic RAG colors, with a steady under-tile glow for daily-money status.
+
+Settings, electricity settings and history share one native modal flow. **Back** returns one level and retains its parent draft; the **X** closes the whole flow. Leaving an unsaved form offers **Keep editing** or **Discard changes**. Long forms scroll between fixed header and footer actions, with safe-area spacing on mobile. Savings and electricity help remain available because those settings affect financial calculations.
+
+A submitted mutation shows its pending state and locks conflicting edits. Closing that dialog does not cancel a dispatched request. A late response cannot close a newly opened editor, and failures stay visible. Deleting recurring items requires an explicit choice between this occurrence and this-and-following occurrences; canceling makes no change.
+
 ## Calculation
 
 For each month:
@@ -315,17 +323,26 @@ The editable panel source is `custom_components/budget_manager/frontend/budget-m
 ```bash
 npm ci
 npm run build
+npm run test:frontend
 ```
 
 The pure calculation and period-copy model is covered by standard-library unit tests:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3.13 -m unittest discover -s tests -v
 node --check custom_components/budget_manager/frontend/budget-manager-panel.src.js
 node --check custom_components/budget_manager/frontend/budget-manager-panel.js
-node tests/test_frontend_locale.mjs
+npm run test:frontend
 python3 -m compileall -q custom_components tests
 ```
+
+The exact shared-library release URL and integrity checksum are pinned in `package-lock.json`; the production bundle contains its runtime code, so Home Assistant does not load dependencies from a CDN. Use Python 3.13 for the standard-library model tests.
+
+Run `npm run preview` and open `http://127.0.0.1:8788/` for a synthetic, non-persistent preview. Add `?theme=light` or `?dialog=settings` for appearance checks. This preview has no Home Assistant connection and serves only an explicit allowlist of fixture/bundle files. Never put real household records into fixtures, screenshots or a release archive.
+
+The CI workflow verifies frontend lifecycle and Python model tests, checks that the tracked bundle is reproducible, and builds a deterministic archive containing only tracked integration code. A matching `v<manifest version>` tag publishes `budget_manager.zip` and `SHA256SUMS`. The archive contains `custom_components/budget_manager/`; HACS continues to install the integration from its repository layout.
+
+For a frontend-only update, install the bundle and reload the Budget Manager config entry. Reload unloads its coordinators/platforms, removes the old panel, and registers the new asset hash in both the JavaScript URL and custom-element name. Reopen the Budget sidebar afterward; restart Home Assistant if panel registration cannot refresh. Do not overwrite or delete `.storage` data when deploying. Verify installed source hashes against the previous release before replacing files to avoid losing local modifications.
 
 Integration runtime testing requires a current Home Assistant development or test instance.
 
