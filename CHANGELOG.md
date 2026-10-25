@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.1
+
+- Show paid/received checkboxes at a regular 22px visual size while retaining a 44px touch target and keyboard focus feedback.
+- Make month-summary tiles fit their labels and values instead of enforcing 100px height; preserve equal row heights, wrapping and shared status glows.
+
+Budget calculations, payment state actions and stored records are unchanged.
+
 ## 0.15.0
 
 - Use the shared `@bitosome/ha-card-ui` 1.0.0 package for native dialogs, navigation, accessibility, theme tokens and calm status glows.
