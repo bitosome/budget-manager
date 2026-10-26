@@ -56,7 +56,7 @@ export const panelStyles = `
   button:disabled { opacity:.55;cursor:default; }
   .native-title strong { font-size:18px;font-weight:700; }.native-title small { font-size:12px; }
   .status-button.done { color:var(--primary-background-color); }
-  .balance-value { font-variant-numeric:tabular-nums; }
+  .balance-value { font-variant-numeric:tabular-nums; } button.balance-value { display:inline-flex;align-items:center;gap:8px;min-height:44px; } .balance-value ha-icon { width:22px;height:22px;--mdc-icon-size:22px;color:var(--muted);flex:0 0 22px; }
   @media(max-width:430px) { .header-actions { gap:0; }.app-bar-button { padding-inline:6px; }.family-icon-button { padding:0; }.metrics .metric strong { font-size:24px; }.budget-dialog .two-col { grid-template-columns:1fr; } }
   @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important;transition:none!important;scroll-behavior:auto!important; } }
 `;

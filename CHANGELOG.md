@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.2
+
+- Use the shared settings, history and edit icons, including a compact pencil for the editable balance.
+- Announce settings and record editors as dialog launchers while preserving the shared Back/X flow and retained drafts.
+- Keep the compact month tiles and normal-sized payment checkboxes from 0.15.1. Financial calculations and records are unchanged.
+
 ## 0.15.1
 
 - Show paid/received checkboxes at a regular 22px visual size while retaining a 44px touch target and keyboard focus feedback.

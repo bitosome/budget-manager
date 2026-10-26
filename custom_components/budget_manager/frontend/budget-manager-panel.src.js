@@ -1,7 +1,7 @@
 import Sortable from "sortablejs";
 import { panelStyles } from "./styles/panel.js";
 import { BudgetDialogs } from "./dialogs.js";
-import { familyStyles, dialogStyles, componentStyles, metricStyles, glowStyles, buildGlow, DESIGN_TOKENS_CSS } from "@bitosome/ha-card-ui";
+import { familyStyles, dialogStyles, componentStyles, metricStyles, glowStyles, buildGlow, DESIGN_TOKENS_CSS, UI_ICONS } from "@bitosome/ha-card-ui";
 
 class BudgetManagerPanel extends HTMLElement {
   constructor() {
@@ -395,9 +395,9 @@ class BudgetManagerPanel extends HTMLElement {
       </div>
       <div slot="actionItems" class="header-actions ${this._month ? "month-header" : "plan-header"}">
           ${previousMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${previousMonth}" title="Previous month: ${this._esc(this._monthLabel(previousMonth))}" aria-label="Previous month: ${this._esc(this._monthLabel(previousMonth))}"><ha-icon icon="mdi:chevron-left" aria-hidden="true"></ha-icon><span>${this._esc(this._monthName(previousMonth))}</span></button>` : ""}
-          ${this._month ? `<button class="app-bar-button" data-action="back-year"><ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon><span>Plan</span></button>` : ""}
+          ${this._month ? `<button class="app-bar-button" data-action="back-year"><ha-icon icon="${UI_ICONS.back}" aria-hidden="true"></ha-icon><span>Plan</span></button>` : ""}
           ${nextMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${nextMonth}" title="Next month: ${this._esc(this._monthLabel(nextMonth))}" aria-label="Next month: ${this._esc(this._monthLabel(nextMonth))}"><span>${this._esc(this._monthName(nextMonth))}</span><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>` : ""}
-          ${this._canEdit ? `<button class="app-bar-button family-icon-button settings-action" data-action="settings" title="Budget settings" aria-label="Budget settings"><ha-icon icon="mdi:cog-outline" aria-hidden="true"></ha-icon></button>` : ""}
+          ${this._canEdit ? `<button class="app-bar-button family-icon-button settings-action" data-action="settings" title="Budget settings" aria-label="Budget settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon></button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
           <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh"><ha-icon icon="mdi:refresh" aria-hidden="true"></ha-icon></button>
       </div>`;
@@ -461,7 +461,7 @@ class BudgetManagerPanel extends HTMLElement {
       </div>
     </div>`;
     const emptyPlan = !(this._state.available_months || []).length
-      ? `<div class="empty-plan matrix-empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings">Open settings</button>` : ""}</div>`
+      ? `<div class="empty-plan matrix-empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Open settings</button>` : ""}</div>`
       : "";
     const rows = new Map();
     for (const monthKey of months) {
@@ -596,9 +596,9 @@ class BudgetManagerPanel extends HTMLElement {
       <section class="month-toolbar">
         <div>
           <span class="eyebrow">Manual account balance</span>
-          ${this._canEdit ? `<button class="balance-value" data-action="edit-balance">${this._money(month.account_balance)} <small>edit</small></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
+          ${this._canEdit ? `<button class="balance-value" data-action="edit-balance" aria-haspopup="dialog" aria-label="Edit account balance: ${this._money(month.account_balance)}">${this._money(month.account_balance)} <ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item" aria-haspopup="dialog"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
       </section>
       ${summary.incomplete ? `<p class="form-help care-notice">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
       <section class="metrics family-metrics family-tile-group">
@@ -612,7 +612,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._renderItems("Expected money in", income, "income")}
       ${this._renderItems("Expenditures", expenses, "expense")}
       ${this._renderItems("Savings", savings, "savings")}
-      ${this._canEdit ? `<div class="danger-zone"><button class="danger-button" data-action="delete-month">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
+      ${this._canEdit ? `<div class="danger-zone"><button class="danger-button" data-action="delete-month" aria-haspopup="dialog">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
   }
 
   _renderItems(title, items, kind) {
@@ -648,7 +648,7 @@ class BudgetManagerPanel extends HTMLElement {
           <div class="item-meta">${periods.length} ${periods.length === 1 ? "period" : "periods"} · ${this._esc(totalHours)} missed work hours · linked to ${this._esc(care.linked_income_name || "hourly income")} in ${this._monthLabel(care.income_month)}</div>
         </div>
         <strong class="item-amount care-benefit-total"><small>Est. benefit</small>${this._money(totalBenefit)}</strong>
-        ${this._canEdit ? `<button class="edit-button" data-action="edit-item" data-id="${item.id}" title="Manage care-leave periods" aria-label="Manage ${this._esc(item.name)}"><ha-icon icon="mdi:pencil"></ha-icon></button>` : ""}
+        ${this._canEdit ? `<button class="edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Manage care-leave periods" aria-label="Manage ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
       </article>`;
     }
     const complete = item.status === "paid" || item.status === "received";
@@ -677,7 +677,7 @@ class BudgetManagerPanel extends HTMLElement {
         </div>
       </div>
       <strong class="item-amount">${electric?.status === "missing" ? "Needs data" : this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
-      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="edit-button" data-action="edit-item" data-id="${item.id}" title="Edit ${this._esc(item.name)}" aria-label="Edit ${this._esc(item.name)}"><ha-icon icon="mdi:pencil"></ha-icon></button>` : ""}
+      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Edit ${this._esc(item.name)}" aria-label="Edit ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
     </article>`;
   }
 
@@ -1006,7 +1006,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
-    <fieldset class="settings-group"><legend>Smart electricity</legend><p class="form-help">Configure grid-cost sources, fixed monthly fees and local forecast learning. Electricity is billed in the month after consumption.</p><button type="button" class="quiet" id="electricity-settings">Electricity settings</button></fieldset>
+    <fieldset class="settings-group"><legend>Smart electricity</legend><p class="form-help">Configure grid-cost sources, fixed monthly fees and local forecast learning. Electricity is billed in the month after consumption.</p><button type="button" class="quiet" id="electricity-settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Electricity settings</button></fieldset>
     <fieldset class="settings-group"><legend>Categories</legend>
       <p class="form-help">Rename a category to update its uses in all months. Removing a category leaves those items uncategorized.</p>
       <div id="category-list">${(settings.categories || []).map((name) => this._categoryEditorRow(name)).join("")}</div>
@@ -1150,7 +1150,7 @@ class BudgetManagerPanel extends HTMLElement {
       <p class="form-help">Pausing learning freezes the fitted model; measured costs continue updating. The model runs locally without a cloud AI service. Price adaptation uses recent consumption-weighted costs, not one volatile hourly price.</p>
       <div class="two-col">${this._field("Buffer on unmeasured costs, %", "buffer_percent", config.buffer_percent ?? 15, "number", "min=0 max=200 step=1 required")}${this._field("Recent-price weight, %", "live_price_weight", config.live_price_weight ?? 50, "number", "min=0 max=100 step=1 required")}${this._field("History window, months", "history_months", config.history_months ?? 36, "number", "min=3 max=60 step=1 required")}${this._field("Learning half-life, months", "half_life_months", config.half_life_months ?? 6, "number", "min=1 max=36 step=1 required")}</div>
       <p class="form-help">Fallback values are used before sufficient data is available. Leave both at zero to show Needs data instead of inventing an estimate.</p><div class="two-col">${this._field("Fallback monthly consumption, kWh", "fallback_monthly_kwh", config.fallback_monthly_kwh ?? 0, "number", "min=0 max=100000 step=0.01 required")}${this._field("Fallback variable price, EUR/kWh", "fallback_price", config.fallback_price ?? 0, "number", "min=0 max=10 step=0.00001 required")}</div></fieldset>
-      <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="quiet" id="electricity-history">Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
+      <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="quiet" id="electricity-history" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.history}" aria-hidden="true"></ha-icon>Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
     const modal = this._openModal("Electricity settings", fields, "Save settings", async form => {
       const electricity = {...config};
       for (const key of ["cost_statistic_id", "energy_statistic_id", "price_entity_id", "method"]) electricity[key] = String(form.get(key) || "").trim();
