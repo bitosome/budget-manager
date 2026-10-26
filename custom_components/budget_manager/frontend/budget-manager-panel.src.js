@@ -359,11 +359,13 @@ class BudgetManagerPanel extends HTMLElement {
 
     if (!this.shadowRoot.getElementById("panel-root")) this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style><div id="panel-root"></div><div id="modal-root"></div><div id="toast" role="status"></div>`;
+    // Metrics and list panels share one glow context. Isolating only the metric
+    // grid lets its halos paint over the following panels, regardless of DOM order.
     this.shadowRoot.getElementById("panel-root").innerHTML = `
       <div class="app ${this._loading ? "is-loading" : ""} ${this._narrow ? "is-narrow" : ""}">
         <ha-top-app-bar-fixed ${this._narrow ? "narrow" : ""}>
           ${this._renderHeader()}
-          <main class="${this._month ? "month-view" : "plan-view"}"><p class="pending-write" role="status" ${this._pendingWrite ? "" : "hidden"}>Saving budget changes…</p>${body}</main>
+          <main class="family-tile-group ${this._month ? "month-view" : "plan-view"}"><p class="pending-write family-tile-face" role="status" ${this._pendingWrite ? "" : "hidden"}>Saving budget changes…</p>${body}</main>
         </ha-top-app-bar-fixed>
       </div>`;
     this._bindEvents();
@@ -593,15 +595,15 @@ class BudgetManagerPanel extends HTMLElement {
     const expenses = month.items.filter((item) => item.kind === "expense" && (item.expense_type === "child_care_leave" || this._itemHasMonthlyValue(item)));
     const savings = month.items.filter((item) => item.kind === "savings");
     return `
-      <section class="month-toolbar">
+      <section class="month-toolbar family-tile-face">
         <div>
           <span class="eyebrow">Manual account balance</span>
           ${this._canEdit ? `<button class="balance-value" data-action="edit-balance" aria-haspopup="dialog" aria-label="Edit account balance: ${this._money(month.account_balance)}">${this._money(month.account_balance)} <ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
         </div>
         ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item" aria-haspopup="dialog"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
       </section>
-      ${summary.incomplete ? `<p class="form-help care-notice">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
-      <section class="metrics family-metrics family-tile-group">
+      ${summary.incomplete ? `<p class="form-help care-notice family-tile-face">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
+      <section class="metrics family-metrics">
         ${this._metric("Expected income", summary.expected_income, "income")}
         ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
         ${this._metric("Savings", summary.planned_savings, "savings")}
@@ -612,11 +614,11 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._renderItems("Expected money in", income, "income")}
       ${this._renderItems("Expenditures", expenses, "expense")}
       ${this._renderItems("Savings", savings, "savings")}
-      ${this._canEdit ? `<div class="danger-zone"><button class="danger-button" data-action="delete-month" aria-haspopup="dialog">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
+      ${this._canEdit ? `<div class="danger-zone family-tile-face"><button class="danger-button" data-action="delete-month" aria-haspopup="dialog">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
   }
 
   _renderItems(title, items, kind) {
-    return `<section class="items-section">
+    return `<section class="items-section family-tile-face">
       <div class="section-title"><div><h2>${title}</h2><p>${items.filter((item) => item.status === "pending" && item.expense_type !== "child_care_leave").length} still open</p></div></div>
       <div class="items-list">
         ${items.length ? items.map((item) => this._renderItem(item, kind)).join("") : `<div class="empty-row">No items</div>`}

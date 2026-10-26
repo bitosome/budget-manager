@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.3
+
+- Keep status glows behind the full month view, including the adjacent income and expense panels, while preserving the halo between tiles.
+- Adopt shared UI 1.0.1, which keeps notice surfaces above neighboring activation glows.
+- Add synthetic glow-on/off and simultaneous-glow preview variants for visual regression checks.
+
+Budget calculations, records, and payment controls are unchanged.
+
 ## 0.15.2
 
 - Use the shared settings, history and edit icons, including a compact pencil for the editable balance.

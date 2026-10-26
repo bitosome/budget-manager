@@ -18,6 +18,9 @@ customElements.define('ha-top-app-bar-fixed',class extends HTMLElement{
 });
 await import('/custom_components/budget_manager/frontend/budget-manager-panel.js');
 const panel=document.createElement('budget-manager-panel-dev');panel._initialized=true;panel._defaultViewApplied=true;panel._year=2026;panel._month=params.has('plan')?null:'2026-09';panel._state=exampleState();
+// Synthetic visual regression variants: compare panel faces with/without a halo.
+if(['green','yellow','red'].includes(params.get('rag')))panel._state.months['2026-09'].summary.rag=params.get('rag');
+if(params.get('halos')==='all'){const metric=panel._metric.bind(panel);panel._metric=(label,value)=>metric(label,value,'yellow')}
 panel._state.months['2026-09'].items.push({id:'example-salary',name:'Example salary',kind:'income',amount:2500,status:'received'},{id:'example-electricity',name:'Electricity',kind:'expense',amount:85,status:'pending',category:'Home'});
 panel._hass={user:{is_admin:true},locale:{language:'en'},config:{time_zone:'UTC'},callWS:async message=>{
  if(message.type==='budget_manager/get_state')return structuredClone(panel._state);
@@ -26,6 +29,7 @@ panel._hass={user:{is_admin:true},locale:{language:'en'},config:{time_zone:'UTC'
  throw Error('Preview only — financial changes are not saved.');
 }};
 panel._load=async()=>panel._render({preserveScroll:true});panel.narrow=matchMedia('(max-width:700px)').matches;document.body.append(panel);
+if(params.get('glow')==='off'){const style=document.createElement('style');style.textContent='.glow-under{visibility:hidden!important}';panel.shadowRoot.append(style)}
 window.previewPanel=panel;
 if(params.get('dialog')==='settings')panel._openSettings();
 </script></body></html>
