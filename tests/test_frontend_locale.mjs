@@ -118,6 +118,14 @@ assert.match(matrix, />September<\/button>/);
 assert.match(matrix, /class="matrix-group-heading"/);
 assert.doesNotMatch(matrix, /Open savings|Forecast remaining|Target funding gap/);
 assert.doesNotMatch(matrix, /data-action="open-month"/);
+// A lone "Savings" row needs no "Savings" group heading; several savings rows keep it.
+const septemberItems = panel._state.months["2026-09"].items;
+septemberItems.push({ id: "save", name: "Savings", kind: "savings", amount: 100, status: "pending" });
+assert.doesNotMatch(panel._renderYearMatrix(), /<tr class="matrix-group savings">/);
+assert.match(panel._renderYearMatrix(), /<tr class="savings"[^>]*>\s*<th title="Savings">/);
+septemberItems.push({ id: "holiday", name: "Holiday fund", kind: "savings", amount: 50, status: "pending" });
+assert.match(panel._renderYearMatrix(), /<tr class="matrix-group savings">/);
+septemberItems.splice(-2);
 const planView = panel._renderYear();
 assert.match(planView, /class="family-action family-toggle" data-action="toggle-matrix-edit" aria-pressed="true"><span>Edit values<\/span><ha-icon class="family-toggle-check"/);
 assert.match(planView, /data-action="toggle-past-months" aria-pressed="true"><span>Past months/);

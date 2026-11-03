@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.1 — 2026-11-03
+
+- Bundle shared UI 1.5.0. Past months and Edit values keep their label centred when they are off instead of reserving an invisible check mark on the right; they keep the same width when switched on.
+- Leave out the Savings group heading in the plan table when the only savings row is Savings itself, so there is no empty row above it. A second savings item brings the heading back.
+
+Budget calculations, records and backend actions are unchanged.
+
 ## 0.16.0 — 2026-11-03
 
 - Adopt shared UI 1.4.0. Buttons, notices, chips and selected pills now use the shared family styles, so the panel no longer mixes three destructive button looks or differently tinted warnings. Past months and Edit values in the plan table are now pressed toggles with a check mark instead of labels that switch text.

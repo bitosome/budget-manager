@@ -527,7 +527,9 @@ class BudgetManagerPanel extends HTMLElement {
       const groupRows = ordered.filter((row) => row.kind === group.kind);
       if (!groupRows.length) return "";
       const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
-      return `${renderGroupHeading(group.kind, group.label)}${groupRows.map((row) => {
+      // A lone row that repeats the group label (the usual "Savings") needs no heading row above it.
+      const redundantHeading = groupRows.length === 1 && groupRows[0].name.trim().toLowerCase() === group.label.toLowerCase();
+      return `${redundantHeading ? "" : renderGroupHeading(group.kind, group.label)}${groupRows.map((row) => {
         const orderIndex = reorderable.indexOf(row);
         const editableName = this._matrixEditMode && orderIndex >= 0;
         const controls = editableName
