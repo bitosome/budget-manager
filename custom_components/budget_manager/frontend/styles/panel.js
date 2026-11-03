@@ -50,7 +50,6 @@ export const panelStyles = `
   .budget-pending { display:contents; }
   .form-help { font-size:12px;line-height:1.5; }
   .pending-write { position:sticky;top:8px;z-index:7;margin:0 0 12px; }
-  .metrics .rag-chip { justify-self:start; }
   .care-notice { margin-bottom:12px; }
   .settings-group { padding:12px;border:0;border-radius:12px;background:var(--family-tile); }
   .settings-group legend { font-weight:650; }

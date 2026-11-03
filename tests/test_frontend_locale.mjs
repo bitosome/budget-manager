@@ -164,7 +164,9 @@ const smartMonth = panel._renderMonth({
 assert.match(smartMonth, />Savings</);
 assert.match(smartMonth, />Remaining</);
 assert.match(smartMonth, /Target funding gap/);
-assert.match(smartMonth, /class="family-chip rag-chip" data-tone="caution">Tight</);
+// The tile glow carries the status visually; no pill, only a spoken label.
+assert.doesNotMatch(smartMonth, /rag-chip|class="family-chip[^"]*" data-tone="caution">Tight/);
+assert.match(smartMonth, /<span class="family-visually-hidden">, Tight<\/span><\/article>/);
 assert.doesNotMatch(smartMonth, /Electricity needs data/);
 assert.match(panel._renderMonth({
   month: "2026-09", account_balance: 0, items: [],

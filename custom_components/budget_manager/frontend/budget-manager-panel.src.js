@@ -426,9 +426,10 @@ class BudgetManagerPanel extends HTMLElement {
 
   _metric(label, value, tone = "") {
     const color = ["danger", "red", "expense"].includes(tone) ? "var(--red)" : tone === "yellow" ? "var(--yellow)" : tone === "warning" ? "var(--amber)" : tone === "savings" ? "var(--blue)" : "var(--green)";
+    // The glow under the tile shows the daily-allowance status; the label is only spoken.
     const rag = RAG_STATUS[tone];
     const glow = buildGlow({ weak: `color-mix(in srgb, ${color} 10%, transparent)`, strong: `color-mix(in srgb, ${color} 18%, transparent)` }, "static", ["green", "yellow", "red"].includes(tone));
-    return `<div class="family-tile-wrap">${glow.style ? `<div class="glow-under" style="${this._esc(glow.style)}" aria-hidden="true"><div class="glow-overlay"></div></div>` : ""}<article class="metric family-metric family-tile-face ${tone}"><span>${label}</span><strong class="family-metric-value">${this._money(value)}</strong>${rag ? `<span class="family-chip rag-chip" data-tone="${rag.tone}">${rag.label}</span>` : ""}</article></div>`;
+    return `<div class="family-tile-wrap">${glow.style ? `<div class="glow-under" style="${this._esc(glow.style)}" aria-hidden="true"><div class="glow-overlay"></div></div>` : ""}<article class="metric family-metric family-tile-face ${tone}"><span>${label}</span><strong class="family-metric-value">${this._money(value)}</strong>${rag ? `<span class="family-visually-hidden">, ${rag.label}</span>` : ""}</article></div>`;
   }
 
   _renderMonthCard(month) {
