@@ -502,11 +502,8 @@ class BudgetManagerPanel extends HTMLElement {
         rows.get(key).months[monthKey] = item;
       }
     }
-    const groups = [
-      { kind: "income", label: "Expected money in" },
-      { kind: "expense", label: "Expenditures" },
-      { kind: "savings", label: "Savings" },
-    ];
+    // Rows run income, expenses, savings; the coloured kind dot marks each group, so there are no group heading rows.
+    const groups = ["income", "expense", "savings"];
     const planOrder = this._state.settings.plan_item_order || {};
     const kindRank = { income: 0, expense: 1, savings: 2 };
     const ordered = [...rows.values()].sort((a, b) => {
@@ -521,16 +518,14 @@ class BudgetManagerPanel extends HTMLElement {
       }
       return a.name.localeCompare(b.name);
     });
-    const renderGroupHeading = (kind, label, showDot = true) => this._stickyFirstColumn
-      ? `<tr class="matrix-group ${kind}"><th class="matrix-group-heading">${showDot ? `<span class="kind-dot"></span>` : ""}${label}</th><td colspan="${months.length}" aria-hidden="true"></td></tr>`
-      : `<tr class="matrix-group ${kind}"><th colspan="${months.length + 1}"><span class="matrix-group-label">${showDot ? `<span class="kind-dot"></span>` : ""}${label}</span></th></tr>`;
-    const renderGroup = (group) => {
-      const groupRows = ordered.filter((row) => row.kind === group.kind);
+    const renderGroupHeading = (kind, label) => this._stickyFirstColumn
+      ? `<tr class="matrix-group ${kind}"><th class="matrix-group-heading">${label}</th><td colspan="${months.length}" aria-hidden="true"></td></tr>`
+      : `<tr class="matrix-group ${kind}"><th colspan="${months.length + 1}"><span class="matrix-group-label">${label}</span></th></tr>`;
+    const renderGroup = (kind) => {
+      const groupRows = ordered.filter((row) => row.kind === kind);
       if (!groupRows.length) return "";
       const reorderable = groupRows.filter((row) => row.orderName && ["income", "expense"].includes(row.kind));
-      // A lone row that repeats the group label (the usual "Savings") needs no heading row above it.
-      const redundantHeading = groupRows.length === 1 && groupRows[0].name.trim().toLowerCase() === group.label.toLowerCase();
-      return `${redundantHeading ? "" : renderGroupHeading(group.kind, group.label)}${groupRows.map((row) => {
+      return groupRows.map((row) => {
         const orderIndex = reorderable.indexOf(row);
         const editableName = this._matrixEditMode && orderIndex >= 0;
         const controls = editableName
@@ -544,7 +539,7 @@ class BudgetManagerPanel extends HTMLElement {
         <th title="${this._esc(row.name)}"><div class="plan-row-heading">${name}${controls}</div></th>
         ${months.map((key) => this._matrixCell(row, row.months[key], key)).join("")}
       </tr>`;
-      }).join("")}`;
+      }).join("");
     };
     const itemColumnWidth = this._matrixEditMode ? 255 : (this._narrow ? 180 : 205);
     return `
@@ -560,7 +555,7 @@ class BudgetManagerPanel extends HTMLElement {
             </thead>
             <tbody>
               ${groups.map(renderGroup).join("")}
-              ${renderGroupHeading("summary", "Plan overview", false)}
+              ${renderGroupHeading("summary", "Plan overview")}
               ${this._matrixSummaryRow("Expected income", months, "expected_income")}
               ${this._matrixSummaryRow("Open expenses", months, "unpaid_expenses")}
               ${this._matrixSummaryRow("Remaining", months, "remaining")}

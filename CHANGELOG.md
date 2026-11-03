@@ -4,6 +4,7 @@
 
 - Refresh date-dependent sensors at midnight on the Home Assistant event loop. The day-change listener was a plain function, so Home Assistant ran it in a worker thread and logged "calls async_write_ha_state from a thread other than the event loop" at each day change. Entity update listeners are now marked as event-loop callbacks.
 - Remove the On track / Tight / Over pill from the per-day tile; the glow under the tile shows the status, and the label is still read out by screen readers. Plan-table cells keep their small status text.
+- Remove the Expected money in, Expenditures and Savings heading rows from the plan table; the coloured dot in front of each row already marks its group. The Plan overview heading above the totals stays.
 
 Budget calculations and records are unchanged.
 
