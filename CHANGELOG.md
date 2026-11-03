@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.2 — 2026-11-03
+
+- Refresh date-dependent sensors at midnight on the Home Assistant event loop. The day-change listener was a plain function, so Home Assistant ran it in a worker thread and logged "calls async_write_ha_state from a thread other than the event loop" at each day change. Entity update listeners are now marked as event-loop callbacks.
+
+Budget calculations, records and the panel are unchanged.
+
 ## 0.16.1 — 2026-11-03
 
 - Bundle shared UI 1.5.0. Past months and Edit values keep their label centred when they are off instead of reserving an invisible check mark on the right; they keep the same width when switched on.

@@ -44,6 +44,15 @@ homeassistant = types.ModuleType("homeassistant")
 homeassistant.__path__ = []
 homeassistant_core = types.ModuleType("homeassistant.core")
 homeassistant_core.HomeAssistant = object
+
+
+def _callback(func):
+    # Mirror homeassistant.core.callback: HassJob runs marked functions on the loop.
+    func._hass_callback = True
+    return func
+
+
+homeassistant_core.callback = _callback
 homeassistant_exceptions = types.ModuleType("homeassistant.exceptions")
 homeassistant_exceptions.HomeAssistantError = Exception
 homeassistant_helpers = types.ModuleType("homeassistant.helpers")

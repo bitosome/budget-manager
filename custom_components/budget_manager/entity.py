@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.event import async_track_time_change
 
@@ -40,10 +41,16 @@ class BudgetEntity(Entity):
             )
         )
 
+    @callback
     def _handle_day_change(self, _now: datetime) -> None:
-        """Refresh date-dependent values at the local midnight boundary."""
+        """Refresh date-dependent values at the local midnight boundary.
+
+        HA runs undecorated sync time listeners in an executor thread, where
+        async_write_ha_state is not allowed, so this must stay a loop callback.
+        """
         self.async_write_ha_state()
 
+    @callback
     def _handle_manager_update(self) -> None:
         """Refresh the entity from in-memory state."""
         self.async_write_ha_state()

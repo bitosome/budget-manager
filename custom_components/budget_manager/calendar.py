@@ -6,7 +6,7 @@ from datetime import datetime
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN, STATUS_PENDING
@@ -74,6 +74,7 @@ class BudgetCalendar(BudgetEntity, CalendarEntity):
             uid=row["uid"],
         )
 
+    @callback
     def _handle_manager_update(self) -> None:
         """Refresh entity and active calendar subscriptions."""
         super()._handle_manager_update()
