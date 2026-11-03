@@ -4,7 +4,7 @@
 
 - Adopt shared UI 1.4.0. Buttons, notices, chips and selected pills now use the shared family styles, so the panel no longer mixes three destructive button looks or differently tinted warnings. Past months and Edit values in the plan table are now pressed toggles with a check mark instead of labels that switch text.
 - Show what each daily-allowance colour means: plan-table cells and the per-day tile now read On track, Tight or Over. Tight uses the shared amber caution colour.
-- Show saving progress on the button that started it, with one pending message instead of two. Paid/received checkboxes show a spinner while their change is saved and keep keyboard focus.
+- Show saving progress on the button that started it, with one pending message instead of two. Paid/received checkboxes show a spinner while their change is saved and keep keyboard focus; a second tap while a change is saving is ignored instead of showing an error.
 - Put single delete and reset confirmations in an equal two-button footer with Cancel focused first. Delete month uses the same layout.
 - Keep error messages on screen until dismissed, with a Refresh action, instead of a red toast that disappears after five seconds. Loading failures offer Try again.
 - Format money with the Home Assistant profile language, matching dates.

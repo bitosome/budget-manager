@@ -108,8 +108,10 @@ toast.querySelectorAll('button')[1].click();check(!toast.classList.contains('sho
 // The paid checkbox shows pending feedback and remains focusable.
 const statusWrite=deferred();p._hass.callWS=async msg=>{p.calls.push(msg);return statusWrite.promise;};p._render();
 const statusButton=p.shadowRoot.querySelector('[data-action=toggle-status]');statusButton.click();await tick();
-check(statusButton.getAttribute('aria-busy')==='true'&&statusButton.querySelector('.family-pending-indicator')&&!statusButton.disabled,'Status toggle is busy while saving');
-statusWrite.resolve({});await tick();await tick();check(statusButton.getAttribute('aria-busy')==='false','Status toggle clears its busy state');
+check(statusButton.getAttribute('aria-busy')==='true'&&statusButton.getAttribute('aria-disabled')==='true'&&statusButton.querySelector('.family-pending-indicator')&&!statusButton.disabled,'Status toggle is busy while saving');
+statusButton.click();await tick();
+check(p.calls.filter(msg=>msg.type==='budget_manager/set_item_status').length===1&&!toast.classList.contains('show'),'Repeated status tap while saving sends nothing and shows no error');
+statusWrite.resolve({});await tick();await tick();check(statusButton.getAttribute('aria-busy')==='false'&&!statusButton.hasAttribute('aria-disabled'),'Status toggle clears its busy state');
 // Native cancellation is owned by shared controller, teardown releases native layer.
 p._openSettings();await tick();const cancel=new Event('cancel',{cancelable:true});p.shadowRoot.querySelector('dialog').dispatchEvent(cancel);
 check(cancel.defaultPrevented&&!d.flow.active,'Native Escape closes a clean form through controller');

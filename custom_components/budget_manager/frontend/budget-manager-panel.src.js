@@ -1958,15 +1958,18 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   async _toggleStatus(itemId, kind, button = null) {
+    // A repeated tap while any change is saving is ignored, not reported as an error.
+    if (this._pendingWrite) return;
     const item = this._state.months[this._month].items.find((entry) => entry.id === itemId);
     const complete = item.status === "paid" || item.status === "received";
     const status = complete ? "pending" : kind === "income" ? "received" : "paid";
     // The checkbox stays focusable so focus and scroll survive the refresh.
-    const idle = button && !this._pendingWrite ? [...button.childNodes] : null;
+    const idle = button ? [...button.childNodes] : null;
     if (idle) {
       const indicator = document.createElement("span");
       render(pendingIndicator(), indicator);
       button.setAttribute("aria-busy", "true");
+      button.setAttribute("aria-disabled", "true");
       button.replaceChildren(indicator);
     }
     try {
@@ -1976,6 +1979,7 @@ class BudgetManagerPanel extends HTMLElement {
     finally {
       if (idle && button.isConnected) {
         button.setAttribute("aria-busy", "false");
+        button.removeAttribute("aria-disabled");
         button.replaceChildren(...idle);
       }
     }
