@@ -1,5 +1,5 @@
 import { nothing, render } from "lit";
-import { FamilyFlowController, renderFamilyDialog } from "@bitosome/ha-card-ui";
+import { FamilyFlowController, renderFamilyDialog, pendingIndicator, TONE_ICONS } from "@bitosome/ha-card-ui";
 
 // Budget-specific DOM forms live here; navigation, native focus and dismissal
 // belong to the shared library. Retain parent forms so Back never rebuilds a draft.
@@ -44,15 +44,16 @@ export class BudgetDialogs {
     const id = `budget-form-${++this.sequence}`;
     const form = document.createElement("form");
     form.id = id; form.className = "budget-form";
-    form.innerHTML = `<div class="budget-form-fields">${fields}</div><p class="form-status" role="status" aria-live="polite" hidden></p>`;
+    form.innerHTML = `<div class="budget-form-fields">${fields}</div><p class="form-status family-notice" data-tone="accent" role="status" aria-live="polite" hidden></p>`;
     const footer = document.createElement("div"); footer.className = "budget-form-actions";
-    footer.innerHTML = `${extraButtons}<button type="button" class="quiet" data-budget-cancel>Cancel</button>${submitLabel ? `<button class="${submitClass}" type="submit" form="${id}">${this.panel._esc(submitLabel)}</button>` : ""}`;
+    // Confirmations use the equal footer and focus Cancel, so Enter never confirms a deletion.
+    footer.innerHTML = `${extraButtons}<button type="button" class="family-action" data-budget-cancel ${options.confirm ? "data-family-initial-focus" : ""}>Cancel</button>${submitLabel ? `<button class="family-action ${submitClass}" type="submit" form="${id}">${this.panel._esc(submitLabel)}</button>` : ""}`;
     const roots = [form, footer];
     const root = {
       querySelector: selector => roots.find(node => node.matches(selector)) || roots.map(node => node.querySelector(selector)).find(Boolean) || null,
       querySelectorAll: selector => roots.flatMap(node => [...node.querySelectorAll(selector)]),
     };
-    const page = { id, title, form, footer, root, baseline: this.snapshot(form), guard: options.guard !== false, scroll: 0, submitting: false };
+    const page = { id, title, form, footer, root, baseline: this.snapshot(form), guard: options.guard !== false, confirm: Boolean(options.confirm), scroll: 0, submitting: false };
     this.pages.set(id, page);
     const wasActive = this.flow.active;
     if (!wasActive) this.panel._captureDialogFocus?.();
@@ -66,9 +67,11 @@ export class BudgetDialogs {
       event.preventDefault();
       if (page.submitting || this.panel._pendingWrite || !this.pages.has(id)) return;
       const data = new FormData(form);
+      const button = footer.querySelector("button[type=submit]");
       page.submitting = true;
       this.lock(page, true, "submit");
-      this.status(page, "Saving…");
+      this.status(page, "");
+      this.busy(button, true, options.pendingLabel);
       try {
         if (await onSubmit(data) === false) { this.status(page, ""); return; }
         page.baseline = this.snapshot(form);
@@ -79,6 +82,7 @@ export class BudgetDialogs {
         if (!this.pages.has(id)) this.panel._showError(error);
       } finally {
         page.submitting = false;
+        this.busy(button, false);
         this.lock(page, false, "submit");
       }
     };
@@ -109,10 +113,27 @@ export class BudgetDialogs {
     page.form.setAttribute("aria-busy", String(!!page.locks.size));
   }
 
+  // The submitting button already says what is pending; other forms get one flow notice.
   pending(enabled) {
     this.pages.forEach(page => this.lock(page, enabled));
-    this.flow.notice = enabled ? "Saving budget changes…" : "";
+    const submitting = [...this.pages.values()].some(page => page.submitting);
+    this.flow.notice = enabled && !submitting ? "Saving budget changes…" : "";
     this.render();
+  }
+
+  busy(button, enabled, label = "Saving…") {
+    if (!button) return;
+    if (enabled) {
+      button.dataset.label = button.textContent;
+      const indicator = document.createElement("span");
+      indicator.className = "budget-pending";
+      render(pendingIndicator(), indicator);
+      button.replaceChildren(indicator, label);
+    } else if (button.dataset.label !== undefined) {
+      button.textContent = button.dataset.label;
+      delete button.dataset.label;
+    }
+    button.setAttribute("aria-busy", String(enabled));
   }
 
   reportError(error) {
@@ -123,16 +144,35 @@ export class BudgetDialogs {
 
   status(page, message, error = false) {
     const node = page.form.querySelector(".form-status");
-    node.textContent = message; node.hidden = !message;
+    const tone = error ? "error" : "accent";
+    const icon = document.createElement("ha-icon");
+    icon.className = "family-notice-icon";
+    icon.setAttribute("icon", TONE_ICONS[tone]);
+    icon.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.className = "family-notice-message";
+    text.textContent = message;
+    node.replaceChildren(...(message ? [icon, text] : []));
+    node.hidden = !message;
+    node.dataset.tone = tone;
     node.setAttribute("role", error ? "alert" : "status");
     node.classList.toggle("error", error);
   }
 
+  // A single confirmation pairs Cancel and the action in an equal footer;
+  // multi-scope choices keep their stacked buttons in the body.
   choose(title, description, choices) {
     return new Promise(resolve => {
-      const buttons = choices.map(choice => `<button type="button" class="${choice.destructive ? "danger-button" : "quiet"}" data-choice="${this.panel._esc(choice.value)}">${this.panel._esc(choice.label)}</button>`).join("");
-      const modal = this.open(title, `<p class="form-help">${this.panel._esc(description)}</p><div class="choice-actions">${buttons}</div>`, null, () => {}, "", "primary", { guard: false });
+      const button = choice => `<button type="button" class="family-action ${choice.destructive ? "destructive" : ""}" data-choice="${this.panel._esc(choice.value)}">${this.panel._esc(choice.label)}</button>`;
+      const single = choices.length === 1;
+      const buttons = single ? "" : `<div class="choice-actions">${choices.map(button).join("")}</div>`;
+      const modal = this.open(title, `<p class="form-help">${this.panel._esc(description)}</p>${buttons}`, null, () => {}, "", "primary", { guard: false, confirm: single && choices[0].destructive });
       if (!modal) { resolve(null); return; }
+      if (single) {
+        modal.page.confirm = true;
+        modal.page.footer.insertAdjacentHTML("beforeend", button(choices[0]));
+        this.render();
+      }
       modal.page.resolve = resolve;
       modal.root.querySelectorAll("[data-choice]").forEach(button => {
         button.onclick = () => {
@@ -151,6 +191,7 @@ export class BudgetDialogs {
     const page = this.pages.get(this.flow.current);
     render(page ? renderFamilyDialog(this.flow, {
       title: page.title, content: page.form, footer: page.footer, wide: true,
+      footerLayout: page.confirm ? "equal" : undefined,
       className: "budget-dialog", bodyClass: "budget-dialog-body",
     }) : nothing, host);
     this.flow.hostUpdated();

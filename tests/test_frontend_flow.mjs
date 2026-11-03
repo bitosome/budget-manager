@@ -54,6 +54,9 @@ check(balance.form.querySelector('input').disabled,'Draft controls lock during w
 check(balance.footer.querySelector('button[type=submit]').disabled,'Duplicate save is disabled');
 check(balance.form.getAttribute('aria-busy')==='true','Pending form is announced');
 check(p.calls.filter(msg=>msg.type==='budget_manager/update_month').length===1,'Only one balance command dispatched');
+const busySubmit=balance.footer.querySelector('button[type=submit]');
+check(busySubmit.getAttribute('aria-busy')==='true'&&busySubmit.querySelector('.family-pending-indicator')&&busySubmit.textContent==='Saving…','Submit shows the shared pending indicator');
+check(balance.form.querySelector('.form-status').hidden&&!d.flow.notice,'The submitting form shows one pending message');
 close();check(!d.flow.active,'An already dispatched save can be dismissed');
 p._openSettings();await tick();const reopened=current();
 check(reopened.form.querySelector('input').disabled,'A new form explains and locks while a previous write finishes');
@@ -91,6 +94,22 @@ Object.defineProperty(historyFile,'files',{value:[{size:2,text:()=>historyRead.p
 const historyTask=historyFile.onchange();d.flow.forceClose();p._openBalanceEditor();await tick();const newer=current();
 historyRead.resolve(JSON.stringify({format:'budget-manager-electricity-history',version:1,records:[]}));await historyTask;
 check(current()===newer&&d.flow.stack.length===1,'Late history import cannot replace a newer form');d.flow.forceClose();
+// Single destructive confirmations use the equal footer with Cancel focused first.
+const confirmTask=p._confirm('Delete example?','Example description','Delete example');await tick();
+const footer=p.shadowRoot.querySelector('.family-dialog-footer');
+check(footer.classList.contains('equal')&&footer.querySelectorAll('.family-action').length===2,'Confirmation renders two equal footer actions');
+check(footer.querySelector('[data-family-initial-focus]')?.hasAttribute('data-budget-cancel')&&footer.querySelector('[data-choice]').classList.contains('destructive'),'Cancel takes initial focus beside the destructive action');
+footer.querySelector('[data-budget-cancel]').click();check(await confirmTask===false&&p.calls.length===0,'Cancelled confirmation sends nothing');
+// Errors outside a dialog persist as a shared notice with recovery.
+p._showError(new Error('Example failure'));const toast=p.shadowRoot.getElementById('toast');
+check(toast.classList.contains('show')&&toast.querySelector('.family-notice[data-tone=error][role=alert]')&&!p._toastTimer,'Errors stay visible as an alert notice');
+check([...toast.querySelectorAll('button')].map(b=>b.textContent.trim()).join()==='Refresh,Dismiss','Error notice offers refresh and dismiss');
+toast.querySelectorAll('button')[1].click();check(!toast.classList.contains('show'),'Dismiss hides the error');
+// The paid checkbox shows pending feedback and remains focusable.
+const statusWrite=deferred();p._hass.callWS=async msg=>{p.calls.push(msg);return statusWrite.promise;};p._render();
+const statusButton=p.shadowRoot.querySelector('[data-action=toggle-status]');statusButton.click();await tick();
+check(statusButton.getAttribute('aria-busy')==='true'&&statusButton.querySelector('.family-pending-indicator')&&!statusButton.disabled,'Status toggle is busy while saving');
+statusWrite.resolve({});await tick();await tick();check(statusButton.getAttribute('aria-busy')==='false','Status toggle clears its busy state');
 // Native cancellation is owned by shared controller, teardown releases native layer.
 p._openSettings();await tick();const cancel=new Event('cancel',{cancelable:true});p.shadowRoot.querySelector('dialog').dispatchEvent(cancel);
 check(cancel.defaultPrevented&&!d.flow.active,'Native Escape closes a clean form through controller');

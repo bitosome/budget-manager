@@ -1,7 +1,15 @@
 import Sortable from "sortablejs";
+import { render } from "lit";
 import { panelStyles } from "./styles/panel.js";
 import { BudgetDialogs } from "./dialogs.js";
-import { familyStyles, dialogStyles, componentStyles, metricStyles, glowStyles, buildGlow, DESIGN_TOKENS_CSS, UI_ICONS } from "@bitosome/ha-card-ui";
+import { familyStyles, dialogStyles, componentStyles, metricStyles, glowStyles, buildGlow, DESIGN_TOKENS_CSS, UI_ICONS, TONE_ICONS, notice, pendingIndicator, formatHassCurrency } from "@bitosome/ha-card-ui";
+
+// Daily-allowance bands come from the integration; the panel only names and colours them.
+const RAG_STATUS = {
+  green: { label: "On track", tone: "success" },
+  yellow: { label: "Tight", tone: "caution" },
+  red: { label: "Over", tone: "error" },
+};
 
 class BudgetManagerPanel extends HTMLElement {
   constructor() {
@@ -194,11 +202,18 @@ class BudgetManagerPanel extends HTMLElement {
 
   _money(value) {
     const currency = this._state?.settings?.currency || "EUR";
-    return new Intl.NumberFormat(this._state?.settings?.locale || "en-GB", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 2,
-    }).format(Number(value || 0));
+    const hass = this._hass?.locale ? this._hass : { language: this._localeLanguage() };
+    return formatHassCurrency(hass, Number(value || 0), { currency, digits: 2 });
+  }
+
+  // String-template twin of the shared notice(): same markup, tone and severity icon.
+  _notice({ tone = "neutral", title = "", message, role, className = "", action = "" }) {
+    const icon = TONE_ICONS[tone];
+    return `<div class="family-notice ${className}" data-tone="${tone}" role="${role || (tone === "error" ? "alert" : "status")}">${icon ? `<ha-icon class="family-notice-icon" icon="${icon}" aria-hidden="true"></ha-icon>` : ""}<div class="family-notice-content">${title ? `<strong class="family-notice-title">${title}</strong>` : ""}<span class="family-notice-message">${message}</span></div>${action ? `<div class="family-notice-actions">${action}</div>` : ""}</div>`;
+  }
+
+  _scrollBehavior() {
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
   }
 
   _localeLanguage() {
@@ -350,22 +365,22 @@ class BudgetManagerPanel extends HTMLElement {
       ? activeElement.dataset.id : null;
     this._destroyPlanSortable();
     const body = this._error
-      ? `<div class="empty error">${this._esc(this._error)}</div>`
+      ? `<div class="empty">${this._notice({ tone: "error", title: "Could not load budget", message: this._esc(this._error), action: `<button type="button" class="family-action" data-action="refresh"><ha-icon icon="mdi:refresh" aria-hidden="true"></ha-icon>Try again</button>` })}</div>`
       : !this._state
-        ? `<div class="empty">Loading budget…</div>`
+        ? `<div class="empty family-async-state" role="status"><span class="family-pending-indicator" aria-hidden="true"></span><span>Loading budget…</span></div>`
         : this._month
           ? this._renderMonth(this._state.months[this._month])
           : this._renderYear();
 
     if (!this.shadowRoot.getElementById("panel-root")) this.shadowRoot.innerHTML = `
-      <style>${this._styles()}</style><div id="panel-root"></div><div id="modal-root"></div><div id="toast" role="status"></div>`;
+      <style>${this._styles()}</style><div id="panel-root"></div><div id="modal-root"></div><div id="toast"></div>`;
     // Metrics and list panels share one glow context. Isolating only the metric
     // grid lets its halos paint over the following panels, regardless of DOM order.
     this.shadowRoot.getElementById("panel-root").innerHTML = `
       <div class="app ${this._loading ? "is-loading" : ""} ${this._narrow ? "is-narrow" : ""}">
         <ha-top-app-bar-fixed ${this._narrow ? "narrow" : ""}>
           ${this._renderHeader()}
-          <main class="family-tile-group ${this._month ? "month-view" : "plan-view"}"><p class="pending-write family-tile-face" role="status" ${this._pendingWrite ? "" : "hidden"}>Saving budget changes…</p>${body}</main>
+          <main class="family-tile-group ${this._month ? "month-view" : "plan-view"}"><p class="pending-write family-notice family-tile-face" data-tone="accent" role="status" ${this._pendingWrite ? "" : "hidden"}><span class="family-pending-indicator" aria-hidden="true"></span><span>Saving budget changes…</span></p>${body}</main>
         </ha-top-app-bar-fixed>
       </div>`;
     this._bindEvents();
@@ -401,7 +416,7 @@ class BudgetManagerPanel extends HTMLElement {
           ${nextMonth ? `<button class="app-bar-button month-nav-button" data-action="open-existing-month" data-month="${nextMonth}" title="Next month: ${this._esc(this._monthLabel(nextMonth))}" aria-label="Next month: ${this._esc(this._monthLabel(nextMonth))}"><span>${this._esc(this._monthName(nextMonth))}</span><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>` : ""}
           ${this._canEdit ? `<button class="app-bar-button family-icon-button settings-action" data-action="settings" title="Budget settings" aria-label="Budget settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon></button>` : ""}
           ${!this._canEdit ? `<span class="read-only">Read only</span>` : ""}
-          <button class="app-bar-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh"><ha-icon icon="mdi:refresh" aria-hidden="true"></ha-icon></button>
+          <button class="app-bar-button family-icon-button refresh-action" data-action="refresh" title="Refresh" aria-label="Refresh"><ha-icon icon="mdi:refresh" aria-hidden="true"></ha-icon></button>
       </div>`;
   }
 
@@ -410,9 +425,10 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _metric(label, value, tone = "") {
-    const color = ["danger", "red", "expense"].includes(tone) ? "var(--red)" : ["yellow", "warning"].includes(tone) ? "var(--amber)" : tone === "savings" ? "var(--blue)" : "var(--green)";
+    const color = ["danger", "red", "expense"].includes(tone) ? "var(--red)" : tone === "yellow" ? "var(--yellow)" : tone === "warning" ? "var(--amber)" : tone === "savings" ? "var(--blue)" : "var(--green)";
+    const rag = RAG_STATUS[tone];
     const glow = buildGlow({ weak: `color-mix(in srgb, ${color} 10%, transparent)`, strong: `color-mix(in srgb, ${color} 18%, transparent)` }, "static", ["green", "yellow", "red"].includes(tone));
-    return `<div class="family-tile-wrap">${glow.style ? `<div class="glow-under" style="${this._esc(glow.style)}" aria-hidden="true"><div class="glow-overlay"></div></div>` : ""}<article class="metric family-metric family-tile-face ${tone}"><span>${label}</span><strong class="family-metric-value">${this._money(value)}</strong></article></div>`;
+    return `<div class="family-tile-wrap">${glow.style ? `<div class="glow-under" style="${this._esc(glow.style)}" aria-hidden="true"><div class="glow-overlay"></div></div>` : ""}<article class="metric family-metric family-tile-face ${tone}"><span>${label}</span><strong class="family-metric-value">${this._money(value)}</strong>${rag ? `<span class="family-chip rag-chip" data-tone="${rag.tone}">${rag.label}</span>` : ""}</article></div>`;
   }
 
   _renderMonthCard(month) {
@@ -446,24 +462,24 @@ class BudgetManagerPanel extends HTMLElement {
       .map((year) => ({ year, count: months.filter((monthKey) => monthKey.startsWith(`${year}-`)).length }))
       .filter(({ count }) => count > 0);
     const matrixActions = `<div class="matrix-title-actions">
-      <button class="quiet past-months-toggle ${this._showPastMonths ? "" : "active"}" data-action="toggle-past-months" aria-pressed="${!this._showPastMonths}">${this._showPastMonths ? "Hide past months" : "Show past months"}</button>
-      ${this._canEdit ? `<button class="quiet matrix-edit-toggle ${this._matrixEditMode ? "active" : ""}" data-action="toggle-matrix-edit" aria-pressed="${this._matrixEditMode}">${this._matrixEditMode ? "Done editing" : "Edit values"}</button>` : ""}
+      ${this._togglePill("Past months", this._showPastMonths, "toggle-past-months")}
+      ${this._canEdit ? this._togglePill("Edit values", this._matrixEditMode, "toggle-matrix-edit") : ""}
     </div>`;
     const planControls = `<div class="plan-table-controls">
       <div class="plan-table-heading"><div><h2>Plan ${years[0]}–${years[1]}</h2><p>Current year followed by next year, left to right</p></div>
         <div class="year-switcher">
-          <button class="icon-button" data-action="prev-year" aria-label="Previous plan years"><ha-icon icon="mdi:chevron-left" aria-hidden="true"></ha-icon></button>
+          <button class="family-icon-button" data-action="prev-year" aria-label="Previous plan years"><ha-icon icon="mdi:chevron-left" aria-hidden="true"></ha-icon></button>
           <button class="year-button" data-action="choose-year">${this._year}–${this._year + 1}</button>
-          <button class="icon-button" data-action="next-year" aria-label="Next plan years"><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>
+          <button class="family-icon-button" data-action="next-year" aria-label="Next plan years"><ha-icon icon="mdi:chevron-right" aria-hidden="true"></ha-icon></button>
         </div>
       </div>
       <div class="plan-table-actions">
         ${matrixActions}
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="quiet" data-action="create-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button><button class="primary" data-action="create-year">Copy / create year</button></div>` : ""}
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="family-action" data-action="create-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button><button class="family-action primary" data-action="create-year">Copy / create year</button></div>` : ""}
       </div>
     </div>`;
     const emptyPlan = !(this._state.available_months || []).length
-      ? `<div class="empty-plan matrix-empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="primary" data-action="settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Open settings</button>` : ""}</div>`
+      ? `<div class="empty-plan matrix-empty-plan"><div><span class="eyebrow">Start here</span><h2>No budget data yet</h2><p>Create a month, create a full year, or import a Budget Manager JSON backup from Settings.</p></div>${this._canEdit ? `<button class="family-action primary" data-action="settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Open settings</button>` : ""}</div>`
       : "";
     const rows = new Map();
     for (const monthKey of months) {
@@ -515,7 +531,7 @@ class BudgetManagerPanel extends HTMLElement {
         const orderIndex = reorderable.indexOf(row);
         const editableName = this._matrixEditMode && orderIndex >= 0;
         const controls = editableName
-          ? `<button type="button" class="plan-drag-handle" data-action="drag-plan-row" aria-label="Reorder ${this._esc(row.name)}" aria-pressed="false" title="Drag to reorder. Keyboard: Space, arrow keys, then Space to drop"><ha-icon icon="mdi:drag-horizontal-variant"></ha-icon></button>`
+          ? `<button type="button" class="family-icon-button plan-drag-handle" data-action="drag-plan-row" aria-label="Reorder ${this._esc(row.name)}" aria-pressed="false" title="Drag to reorder. Keyboard: Space, arrow keys, then Space to drop"><ha-icon icon="${UI_ICONS.drag}" aria-hidden="true"></ha-icon></button>`
           : "";
         const name = editableName
           ? `<span class="plan-row-label editing"><span class="kind-dot"></span><input class="plan-name-input" type="text" value="${this._esc(row.name)}" data-action="edit-plan-name" data-kind="${row.kind}" data-original-name="${this._esc(row.name)}" aria-label="Rename ${this._esc(row.name)}" required></span>`
@@ -558,7 +574,8 @@ class BudgetManagerPanel extends HTMLElement {
       const summary = this._state.months[monthKey]?.summary;
       if (!summary) return `<td class="blank">—</td>`;
       if (summary.incomplete && ["daily_allowance", "remaining", "planned_savings", "daily_target_shortfall"].includes(key)) return `<td title="Electricity needs data; forecast is incomplete">Needs data</td>`;
-      return `<td class="${tone === "rag" ? `rag-cell ${summary.rag}` : ""}">${this._money(summary[key])}</td>`;
+      const rag = tone === "rag" ? RAG_STATUS[summary.rag] : null;
+      return `<td class="${rag ? `rag-cell ${summary.rag}` : ""}">${this._money(summary[key])}${rag ? `<small>${rag.label}</small>` : ""}</td>`;
     }).join("")}</tr>`;
   }
 
@@ -600,9 +617,9 @@ class BudgetManagerPanel extends HTMLElement {
           <span class="eyebrow">Manual account balance</span>
           ${this._canEdit ? `<button class="balance-value" data-action="edit-balance" aria-haspopup="dialog" aria-label="Edit account balance: ${this._money(month.account_balance)}">${this._money(month.account_balance)} <ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : `<strong class="balance-value">${this._money(month.account_balance)}</strong>`}
         </div>
-        ${this._canEdit ? `<div class="toolbar-actions"><button class="primary" data-action="add-item" aria-haspopup="dialog"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
+        ${this._canEdit ? `<div class="toolbar-actions"><button class="family-action primary" data-action="add-item" aria-haspopup="dialog"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add item</button></div>` : ""}
       </section>
-      ${summary.incomplete ? `<p class="form-help care-notice family-tile-face">Electricity needs data. Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.</p>` : ""}
+      ${summary.incomplete ? this._notice({ tone: "warning", title: "Electricity needs data", message: "Totals and daily money exclude this unknown cost; automatic savings are paused until it is configured.", className: "care-notice family-tile-face" }) : ""}
       <section class="metrics family-metrics">
         ${this._metric("Expected income", summary.expected_income, "income")}
         ${this._metric("Unpaid expenses", summary.unpaid_expenses, "expense")}
@@ -614,7 +631,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._renderItems("Expected money in", income, "income")}
       ${this._renderItems("Expenditures", expenses, "expense")}
       ${this._renderItems("Savings", savings, "savings")}
-      ${this._canEdit ? `<div class="danger-zone family-tile-face"><button class="danger-button" data-action="delete-month" aria-haspopup="dialog">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
+      ${this._canEdit ? `<div class="danger-zone family-tile-face"><button class="family-action destructive" data-action="delete-month" aria-haspopup="dialog">Delete ${this._monthLabel(month.month)}</button></div>` : ""}`;
   }
 
   _renderItems(title, items, kind) {
@@ -646,11 +663,11 @@ class BudgetManagerPanel extends HTMLElement {
       return `<article class="item care-leave-item">
         <span class="status-placeholder" aria-hidden="true"></span>
         <div class="item-main">
-          <div class="item-title">${this._esc(item.name)} <span class="badge care-badge">Care leave</span></div>
+          <div class="item-title">${this._esc(item.name)} <span class="family-chip" data-tone="accent">Care leave</span></div>
           <div class="item-meta">${periods.length} ${periods.length === 1 ? "period" : "periods"} · ${this._esc(totalHours)} missed work hours · linked to ${this._esc(care.linked_income_name || "hourly income")} in ${this._monthLabel(care.income_month)}</div>
         </div>
         <strong class="item-amount care-benefit-total"><small>Est. benefit</small>${this._money(totalBenefit)}</strong>
-        ${this._canEdit ? `<button class="edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Manage care-leave periods" aria-label="Manage ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
+        ${this._canEdit ? `<button class="family-icon-button edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Manage care-leave periods" aria-label="Manage ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
       </article>`;
     }
     const complete = item.status === "paid" || item.status === "received";
@@ -665,7 +682,7 @@ class BudgetManagerPanel extends HTMLElement {
     return `<article class="item ${complete ? "complete" : ""} ${item.needs_review ? "needs-review" : ""}">
       <button class="status-button ${complete ? "done" : ""}" data-action="toggle-status" data-id="${item.id}" data-kind="${kind}" title="${actionLabel}" aria-label="${this._esc(actionLabel)}" aria-pressed="${complete}">${complete ? `<ha-icon icon="mdi:check" aria-hidden="true"></ha-icon>` : ""}</button>
       <div class="item-main">
-        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="badge review-badge">Needs review</span>` : ""} ${item.automatic_savings ? `<span class="badge savings-badge">Calculated</span>` : item.dynamic && kind === "savings" ? `<span class="badge savings-badge">Adjusted</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="badge care-badge">Estimated</span>` : ""} ${item.special ? `<span class="badge">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
+        <div class="item-title">${this._esc(displayName)} ${item.needs_review ? `<span class="family-chip" data-tone="warning">Needs review</span>` : ""} ${item.automatic_savings ? `<span class="family-chip" data-tone="accent">Calculated</span>` : item.dynamic && kind === "savings" ? `<span class="family-chip" data-tone="accent">Adjusted</span>` : ""} ${item.generated_type === "tervisekassa_care_benefit" ? `<span class="family-chip" data-tone="accent">Estimated</span>` : ""} ${item.special ? `<span class="family-chip" data-tone="caution">${this._esc(item.special_label || "Renewal")}</span>` : ""}</div>
         <div class="item-meta">
           ${item.due_day ? `Day ${item.due_day}` : "No due day"}
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
@@ -679,7 +696,7 @@ class BudgetManagerPanel extends HTMLElement {
         </div>
       </div>
       <strong class="item-amount">${electric?.status === "missing" ? "Needs data" : this._money(amount)}${adjusted ? `<small>planned ${this._money(item.amount)}</small>` : ""}</strong>
-      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Edit ${this._esc(item.name)}" aria-label="Edit ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
+      ${this._canEdit && item.generated_type !== "tervisekassa_care_benefit" && !(kind === "savings" && this._state.settings.automatic_savings_enabled) ? `<button class="family-icon-button edit-button" aria-haspopup="dialog" data-action="edit-item" data-id="${item.id}" title="Edit ${this._esc(item.name)}" aria-label="Edit ${this._esc(item.name)}"><ha-icon icon="${UI_ICONS.edit}" aria-hidden="true"></ha-icon></button>` : ""}
     </article>`;
   }
 
@@ -694,7 +711,7 @@ class BudgetManagerPanel extends HTMLElement {
     const reason = item.status !== "pending"
       ? "Reopen this expenditure before changing its actual bill."
       : `Actual bill entry becomes available after ${consumptionLabel} ends.`;
-    return `<fieldset class="settings-group electricity-bill-editor" id="electricity-bill-editor"><legend>Actual electricity bill</legend><p class="form-help">Reconcile this expenditure with the supplier invoice for ${this._esc(consumptionLabel)} consumption. The bill remains unpaid until you check the expenditure.</p><button type="button" class="quiet electricity-bill-button" id="open-electricity-bill" ${eligible ? "" : `disabled title="${this._esc(reason)}"`}><ha-icon icon="mdi:receipt-text-edit-outline"></ha-icon><span>${this._esc(eligible ? label : reason)}</span></button></fieldset>`;
+    return `<fieldset class="settings-group electricity-bill-editor" id="electricity-bill-editor"><legend>Actual electricity bill</legend><p class="form-help">Reconcile this expenditure with the supplier invoice for ${this._esc(consumptionLabel)} consumption. The bill remains unpaid until you check the expenditure.</p><button type="button" class="family-action electricity-bill-button" id="open-electricity-bill" ${eligible ? "" : `disabled title="${this._esc(reason)}"`}><ha-icon icon="mdi:receipt-text-edit-outline" aria-hidden="true"></ha-icon><span>${this._esc(eligible ? label : reason)}</span></button></fieldset>`;
   }
 
   _bindEvents() {
@@ -764,7 +781,7 @@ class BudgetManagerPanel extends HTMLElement {
     if (action === "edit-balance") return this._openBalanceEditor();
     if (action === "add-item") return this._openItemEditor();
     if (action === "edit-item") return this._openItemEditor(button.dataset.id);
-    if (action === "toggle-status") return this._toggleStatus(button.dataset.id, button.dataset.kind);
+    if (action === "toggle-status") return this._toggleStatus(button.dataset.id, button.dataset.kind, button);
     if (action === "delete-month") return this._deleteMonth();
   }
 
@@ -1008,13 +1025,13 @@ class BudgetManagerPanel extends HTMLElement {
       ${this._field("Target, EUR/day", "savings_target_threshold", settings.savings_target_threshold ?? 45, "number", "min=0 step=0.01 required")}
       ${this._field("Floor, EUR/day", "savings_floor_threshold", settings.savings_floor_threshold ?? 40, "number", "min=0 step=0.01 required")}
     </div></fieldset>
-    <fieldset class="settings-group"><legend>Smart electricity</legend><p class="form-help">Configure grid-cost sources, fixed monthly fees and local forecast learning. Electricity is billed in the month after consumption.</p><button type="button" class="quiet" id="electricity-settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Electricity settings</button></fieldset>
+    <fieldset class="settings-group"><legend>Smart electricity</legend><p class="form-help">Configure grid-cost sources, fixed monthly fees and local forecast learning. Electricity is billed in the month after consumption.</p><button type="button" class="family-action" id="electricity-settings" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.settings}" aria-hidden="true"></ha-icon>Electricity settings</button></fieldset>
     <fieldset class="settings-group"><legend>Categories</legend>
       <p class="form-help">Rename a category to update its uses in all months. Removing a category leaves those items uncategorized.</p>
       <div id="category-list">${(settings.categories || []).map((name) => this._categoryEditorRow(name)).join("")}</div>
-      <button type="button" class="quiet" id="add-category"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add category</button>
+      <button type="button" class="family-action" id="add-category"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add category</button>
     </fieldset>
-    <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="quiet" id="export-json">Export JSON</button><button type="button" class="quiet" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`;
+    <section class="data-settings"><div><h3>Import and export</h3><p class="form-help">Export a complete portable backup, or replace this budget with a Budget Manager JSON file.</p></div><div class="data-actions"><button type="button" class="family-action" id="export-json">Export JSON</button><button type="button" class="family-action" id="import-json">Import JSON</button><input type="file" id="import-file" accept="application/json,.json" hidden></div></section>`;
     const modal = this._openModal("Budget settings", fields, "Save settings", async (form) => {
       const cycleEndDay = Number(form.get("cycle_end_day"));
       const green = Number(form.get("daily_green_threshold"));
@@ -1060,12 +1077,12 @@ class BudgetManagerPanel extends HTMLElement {
   }
 
   _categoryEditorRow(name) {
-    return `<div class="category-editor-row"><input name="category-name" aria-label="Category name" value="${this._esc(name)}" data-original="${this._esc(name)}" maxlength="100" required><button type="button" class="quiet" data-remove-category>Remove</button></div>`;
+    return `<div class="category-editor-row"><input name="category-name" aria-label="Category name" value="${this._esc(name)}" data-original="${this._esc(name)}" maxlength="100" required><button type="button" class="family-action quiet" data-remove-category>Remove</button></div>`;
   }
 
   _electricityFeeRow(fee = {}) {
     const dateField = (name, value, label, unlimited) => `<div><label><span>${label}</span><select data-fee-bound="${name}"><option value="unlimited" ${!value ? "selected" : ""}>${unlimited}</option><option value="month" ${value ? "selected" : ""}>Choose month</option></select></label><label ${!value ? "hidden" : ""} data-fee-date><span>${label} — month</span><input name="${name}" type="month" value="${this._esc(value || "")}" ${!value ? "disabled" : "required"}></label></div>`;
-    return `<div class="electricity-fee settings-group">${this._field("Fee name", "fee-name", fee.name || "", "text", "required")}${this._field("Monthly amount including VAT, EUR", "fee-amount", fee.amount ?? "", "number", "min=0 step=0.01 required")}<div class="two-col">${dateField("fee-from", fee.from_month, "From consumption month", "No start limit")}${dateField("fee-to", fee.to_month, "Through consumption month", "No end limit")}</div><button type="button" class="danger-button" data-remove-fee>Remove fee</button></div>`;
+    return `<div class="electricity-fee settings-group">${this._field("Fee name", "fee-name", fee.name || "", "text", "required")}${this._field("Monthly amount including VAT, EUR", "fee-amount", fee.amount ?? "", "number", "min=0 step=0.01 required")}<div class="two-col">${dateField("fee-from", fee.from_month, "From consumption month", "No start limit")}${dateField("fee-to", fee.to_month, "Through consumption month", "No end limit")}</div><button type="button" class="family-action destructive" data-remove-fee>Remove fee</button></div>`;
   }
 
   _canRecordElectricityBill(consumptionMonth) {
@@ -1145,14 +1162,14 @@ class BudgetManagerPanel extends HTMLElement {
       ${sensorField("Accumulated grid cost statistic (EUR)", "cost_statistic_id", ["EUR", "€"])}
       ${sensorField("Grid consumption statistic (kWh)", "energy_statistic_id", ["kWh"])}
       ${sensorField("Real electricity price sensor (reference, optional)", "price_entity_id", ["€/kWh", "EUR/kWh"])}
-      <fieldset class="settings-group"><legend>Fixed monthly fees</legend><p class="form-help">Separate fees are added once per consumption month, not once per day. Date ranges let you schedule tariff changes.</p><div id="electricity-fees">${(config.fees || []).map(f => this._electricityFeeRow(f)).join("")}</div><button type="button" class="quiet" id="add-electricity-fee"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add fee</button></fieldset>
+      <fieldset class="settings-group"><legend>Fixed monthly fees</legend><p class="form-help">Separate fees are added once per consumption month, not once per day. Date ranges let you schedule tariff changes.</p><div id="electricity-fees">${(config.fees || []).map(f => this._electricityFeeRow(f)).join("")}</div><button type="button" class="family-action" id="add-electricity-fee"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add fee</button></fieldset>
       <fieldset class="settings-group"><legend>Forecast and learning</legend>
       <label><span>Estimation method</span><select name="method"><option value="adaptive" ${config.method !== "recent_average" ? "selected" : ""}>Adaptive seasonal regression</option><option value="recent_average" ${config.method === "recent_average" ? "selected" : ""}>Recent weighted average</option></select></label>
       <label class="check"><input type="checkbox" name="learning_enabled" ${config.learning_enabled !== false ? "checked" : ""}><span>Learn automatically from completed months</span></label>
       <p class="form-help">Pausing learning freezes the fitted model; measured costs continue updating. The model runs locally without a cloud AI service. Price adaptation uses recent consumption-weighted costs, not one volatile hourly price.</p>
       <div class="two-col">${this._field("Buffer on unmeasured costs, %", "buffer_percent", config.buffer_percent ?? 15, "number", "min=0 max=200 step=1 required")}${this._field("Recent-price weight, %", "live_price_weight", config.live_price_weight ?? 50, "number", "min=0 max=100 step=1 required")}${this._field("History window, months", "history_months", config.history_months ?? 36, "number", "min=3 max=60 step=1 required")}${this._field("Learning half-life, months", "half_life_months", config.half_life_months ?? 6, "number", "min=1 max=36 step=1 required")}</div>
       <p class="form-help">Fallback values are used before sufficient data is available. Leave both at zero to show Needs data instead of inventing an estimate.</p><div class="two-col">${this._field("Fallback monthly consumption, kWh", "fallback_monthly_kwh", config.fallback_monthly_kwh ?? 0, "number", "min=0 max=100000 step=0.01 required")}${this._field("Fallback variable price, EUR/kWh", "fallback_price", config.fallback_price ?? 0, "number", "min=0 max=10 step=0.00001 required")}</div></fieldset>
-      <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="quiet" id="electricity-history" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.history}" aria-hidden="true"></ha-icon>Review / import history</button><button type="button" class="quiet" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="quiet" data-electricity-action="retrain">Retrain now</button><button type="button" class="danger-button" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
+      <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="family-action" id="electricity-history" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.history}" aria-hidden="true"></ha-icon>Review / import history</button><button type="button" class="family-action" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="family-action" data-electricity-action="retrain">Retrain now</button><button type="button" class="family-action destructive" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
     const modal = this._openModal("Electricity settings", fields, "Save settings", async form => {
       const electricity = {...config};
       for (const key of ["cost_statistic_id", "energy_statistic_id", "price_entity_id", "method"]) electricity[key] = String(form.get(key) || "").trim();
@@ -1240,8 +1257,8 @@ class BudgetManagerPanel extends HTMLElement {
     const state = this._state.electricity || {};
     const observations = Object.fromEntries(Object.entries(state.observations || {}).filter(([key]) => !(state.ignored_months || []).includes(key)));
     const records = imported || Object.values({...observations,...state.history}).sort((a,b)=>a.month.localeCompare(b.month));
-    const rowHtml = row => `<div class="electricity-history-row settings-group"><div class="two-col">${this._field("Consumption month", "history-month", row.month || "", "month", "required")}${this._field("Consumption, kWh", "history-kwh", row.kwh ?? "", "number", "min=0 step=0.001 required")}${this._field("Variable grid cost incl. VAT, EUR", "history-cost", row.grid_cost ?? "", "number", "step=0.01 required")}${this._field("Billed fixed fees incl. VAT, EUR", "history-fees", row.fixed_fees ?? 0, "number", "min=0 step=0.01 required")}</div><label class="check"><input type="checkbox" name="history-enabled" ${row.enabled !== false ? "checked" : ""}><span>Use this month for training</span></label><input type="hidden" name="history-source" value="${this._esc(row.source || "manual")}"><button type="button" class="danger-button" data-remove-history>Remove month</button></div>`;
-    const modal = this._openModal("Electricity history", `<p class="form-help">Completed consumption months only. Variable grid cost is the full invoice total minus its fixed fees, including VAT. Combine supplier-change partial bills into one month. Uncheck outliers to exclude them from training while retaining their actual bill. Saving makes these rows the confirmed history; confirmed data takes priority over Recorder.</p><div class="data-actions"><button type="button" class="quiet" id="import-electricity-history">Import JSON</button><button type="button" class="quiet" id="export-electricity-history">Export JSON</button><input type="file" id="electricity-history-file" accept=".json,application/json" hidden><button type="button" class="quiet" id="add-electricity-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button></div><div id="electricity-history-rows">${records.map(rowHtml).join("")}</div>`, "Save history", async () => {
+    const rowHtml = row => `<div class="electricity-history-row settings-group"><div class="two-col">${this._field("Consumption month", "history-month", row.month || "", "month", "required")}${this._field("Consumption, kWh", "history-kwh", row.kwh ?? "", "number", "min=0 step=0.001 required")}${this._field("Variable grid cost incl. VAT, EUR", "history-cost", row.grid_cost ?? "", "number", "step=0.01 required")}${this._field("Billed fixed fees incl. VAT, EUR", "history-fees", row.fixed_fees ?? 0, "number", "min=0 step=0.01 required")}</div><label class="check"><input type="checkbox" name="history-enabled" ${row.enabled !== false ? "checked" : ""}><span>Use this month for training</span></label><input type="hidden" name="history-source" value="${this._esc(row.source || "manual")}"><button type="button" class="family-action destructive" data-remove-history>Remove month</button></div>`;
+    const modal = this._openModal("Electricity history", `<p class="form-help">Completed consumption months only. Variable grid cost is the full invoice total minus its fixed fees, including VAT. Combine supplier-change partial bills into one month. Uncheck outliers to exclude them from training while retaining their actual bill. Saving makes these rows the confirmed history; confirmed data takes priority over Recorder.</p><div class="data-actions"><button type="button" class="family-action" id="import-electricity-history">Import JSON</button><button type="button" class="family-action" id="export-electricity-history">Export JSON</button><input type="file" id="electricity-history-file" accept=".json,application/json" hidden><button type="button" class="family-action" id="add-electricity-month"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Month</button></div><div id="electricity-history-rows">${records.map(rowHtml).join("")}</div>`, "Save history", async () => {
       await this._callWS({type:"budget_manager/electricity",action:"history",document:getDocument()});
     }, "", "primary", { replace });
     const getDocument = () => ({format:"budget-manager-electricity-history",version:1,records:[...modal.root.querySelectorAll('.electricity-history-row')].map(row=>({month:row.querySelector('[name="history-month"]').value,kwh:Number(row.querySelector('[name="history-kwh"]').value),grid_cost:Number(row.querySelector('[name="history-cost"]').value),fixed_fees:Number(row.querySelector('[name="history-fees"]').value),enabled:row.querySelector('[name="history-enabled"]').checked,source:row.querySelector('[name="history-source"]').value}))});
@@ -1449,7 +1466,7 @@ class BudgetManagerPanel extends HTMLElement {
       : "";
     const assigneeOptions = this._assignees.map((user) => `<option value="${this._esc(user.id)}" ${item?.assignee_user_id === user.id ? "selected" : ""}>${this._esc(user.name)} · ${user.device_count} ${user.device_count === 1 ? "device" : "devices"}</option>`).join("");
     const fields = `
-      ${item?.needs_review ? `<div class="review-notice"><strong>Review required</strong><span>This value was entered in the plan table. Check its details; saving this form clears the review flag.</span></div>` : ""}
+      ${item?.needs_review ? this._notice({ tone: "warning", title: "Review required", message: "This value was entered in the plan table. Check its details; saving this form clears the review flag." }) : ""}
       <div class="two-col">
         <label><span>Type</span><select name="kind" id="item-kind"><option value="expense" ${!item || item?.kind === "expense" && item?.expense_type !== "electricity" ? "selected" : ""}>Expenditure</option><option value="income" ${item?.kind === "income" ? "selected" : ""}>Expected income</option>${!this._state.settings.automatic_savings_enabled || item?.kind === "savings" ? `<option value="savings" ${item?.kind === "savings" ? "selected" : ""}>Savings</option>` : ""}<option value="electricity" ${item?.expense_type === "electricity" ? "selected" : ""}>Electricity (smart)</option><option value="care_leave">Child-care sick leave</option></select></label>
         ${this._field("Amount", "amount", item?.amount ?? "", "number", "min=0 step=0.01 required")}
@@ -1460,7 +1477,7 @@ class BudgetManagerPanel extends HTMLElement {
       ${item && ["income", "expense"].includes(item.kind) ? `<p class="form-help">Names are shared across all months. When you save a recurring item, you can choose which occurrences receive the other changes.</p>` : ""}
       <fieldset class="settings-group care-leave-settings" id="care-leave-settings" hidden>
         <legend>Child-care sick leave</legend>
-        ${careIncomeOptions.length ? `<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${careIncomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}">${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>` : `<div class="review-notice"><strong>No eligible income found</strong><span>Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month.</span></div>`}
+        ${careIncomeOptions.length ? `<label><span>Salary affected by this leave</span><select name="care_income_link" id="care-income-link" required>${careIncomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}">${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>` : this._notice({ tone: "warning", title: "No eligible income found", message: "Create an expected income using automatic Estonian hourly calculation for this work month. If salary is paid afterward, set its work period to the previous month." })}
         <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="benefit-basis-mode"><option value="estimated_hourly">Estimate from the selected hourly income</option><option value="actual_previous_year_income">Use actual previous-year social-taxable income</option></select></label>
         <label id="actual-income-field" hidden><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value=""></label>
         <p class="form-help" id="care-basis-help"></p>
@@ -1476,7 +1493,7 @@ class BudgetManagerPanel extends HTMLElement {
             ${this._field("Working hours", "working_hours", incomeCalculation?.working_hours ?? "", "number", "min=0.01 step=0.01")}
           </div>
           <label class="check"><input type="checkbox" name="automatic_working_hours" id="automatic-working-hours" ${automaticWorkingHours ? "checked" : ""}><span>Use Estonia's standard monthly working hours automatically</span></label>
-          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(monthKey, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="quiet" id="refresh-working-hours">Refresh hours</button></div>
+          <div class="calendar-source"><span id="working-hours-status">${incomeCalculation ? `${this._monthLabel(incomeCalculation.working_time_month || this._incomeWorkingMonth(monthKey, workPeriod))} · ${this._esc(incomeCalculation.working_days || 0)} working days · ${this._esc(incomeCalculation.calendar_source || "stored")}` : "Working hours are loaded when enabled."}</span><button type="button" class="family-action quiet" id="refresh-working-hours">Refresh hours</button></div>
           <label class="check"><input type="checkbox" name="apply_social_tax_minimum" ${incomeCalculation?.apply_social_tax_minimum !== false ? "checked" : ""}><span>Apply the social-tax minimum monthly base (€886)</span></label>
           <div class="tax-free-setting">
             <label class="check"><input type="checkbox" name="apply_tax_free_income" ${incomeCalculation?.apply_tax_free_income !== false ? "checked" : ""}><span>Apply tax-free income</span></label>
@@ -1514,7 +1531,7 @@ class BudgetManagerPanel extends HTMLElement {
       </div></fieldset>
       <label class="check"><input type="checkbox" name="special" ${item?.special ? "checked" : ""}><span>Mark as renewal</span></label>
       <label><span>Notes</span><textarea name="notes" rows="3">${this._esc(item?.notes || "")}</textarea></label>`;
-    const extra = item ? `<button type="button" class="danger-button" id="delete-item">Delete</button>` : "";
+    const extra = item ? `<button type="button" class="family-action destructive" id="delete-item">Delete</button>` : "";
     const modal = this._openModal(item ? "Edit item" : "Add item", fields, item ? "Save" : "Add", async (form) => {
       const recurrence = form.get("recurrence");
       const selectedKind = form.get("kind");
@@ -1824,24 +1841,24 @@ class BudgetManagerPanel extends HTMLElement {
       const dateLabel = this._formatDateRange(period.start, period.end);
       return `<article class="care-period" data-period-id="${period.id}">
         <div><strong>${this._esc(dateLabel)}</strong><span>${this._esc(calculation.calendar_days || 0)} calendar days · ${this._esc(calculation.missed_working_hours || 0)} missed work hours</span><span>Estimated Tervisekassa net benefit ${this._money(calculation.estimated_net_benefit || 0)}</span></div>
-        <div class="care-period-actions"><button type="button" class="quiet edit-care-period" data-period-id="${period.id}">Edit</button><button type="button" class="danger-button delete-care-period" data-period-id="${period.id}">Remove</button></div>
+        <div class="care-period-actions"><button type="button" class="family-action quiet edit-care-period" data-period-id="${period.id}">Edit</button><button type="button" class="family-action destructive delete-care-period" data-period-id="${period.id}">Remove</button></div>
       </article>`;
     }).join("") : `<div class="empty-row">No care-leave periods recorded yet.</div>`;
     const fields = `
-      <div class="review-notice care-estimate-notice" role="note"><strong>Planning approximation</strong><span>Budget Manager estimates the salary reduction and Tervisekassa payment. The final payment can differ because Tervisekassa uses official income and eligibility data.</span></div>
+      ${this._notice({ tone: "accent", title: "Planning approximation", message: "Budget Manager estimates the salary reduction and Tervisekassa payment. The final payment can differ because Tervisekassa uses official income and eligibility data.", role: "note", className: "care-estimate-notice" })}
       ${this._field("Name", "name", item.name, "text", "required")}
       <label><span>Salary affected by this leave</span><select name="care_income_link" required>${incomeOptions.map(({ incomeMonth, item: income }) => `<option value="${this._careIncomeOptionValue(incomeMonth, income.id)}" ${this._careIncomeOptionValue(incomeMonth, income.id) === selectedLink ? "selected" : ""}>${this._esc(income.name)} · paid in ${this._monthLabel(incomeMonth)}</option>`).join("")}</select></label>
       <label><span>Tervisekassa benefit income basis</span><select name="benefit_basis_mode" id="care-editor-basis"><option value="estimated_hourly" ${basisMode === "estimated_hourly" ? "selected" : ""}>Estimate from the selected hourly income</option><option value="actual_previous_year_income" ${basisMode === "actual_previous_year_income" ? "selected" : ""}>Use actual previous-year social-taxable income</option></select></label>
       <label id="care-editor-actual-field"><span>Previous-year social-taxable income, EUR</span><input type="number" name="actual_previous_year_income" min="0.01" step="0.01" value="${this._esc(care.actual_previous_year_income || "")}"></label>
       <p class="form-help" id="care-editor-basis-help"></p>
-      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="quiet" id="new-care-period"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add period</button></div><div class="care-period-list">${periodRows}</div></section>
+      <section class="care-periods" aria-label="Recorded care-leave periods"><div class="care-periods-head"><div><strong>Recorded periods <span class="care-period-count">${periods.length}</span></strong><span>Each period produces a separate estimated income in ${this._monthLabel(care.income_month)}.</span></div><button type="button" class="family-action" id="new-care-period"><ha-icon icon="mdi:plus" aria-hidden="true"></ha-icon> Add period</button></div><div class="care-period-list">${periodRows}</div></section>
       <fieldset class="settings-group" id="care-period-form" hidden>
         <legend id="care-period-form-title">Add period</legend>
         <input type="hidden" id="care-period-id">
         <div class="two-col">${this._field("Start date", "care_period_start", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}${this._field("End date", "care_period_end", bounds.min, "date", `min="${bounds.min}" max="${bounds.max}"`)}</div>
         <label class="check"><input type="checkbox" name="care_period_include_weekends"><span>Include weekends</span></label>
         <p class="form-help">Count weekends as working days when calculating missed salary hours. Public holidays remain excluded. The estimated care benefit still counts all calendar days.</p>
-        <div class="inline-actions"><button type="button" class="quiet" id="cancel-care-period">Cancel</button><button type="button" class="primary" id="save-care-period">Save period</button></div>
+        <div class="inline-actions"><button type="button" class="family-action" id="cancel-care-period">Cancel</button><button type="button" class="family-action primary" id="save-care-period">Save period</button></div>
       </fieldset>`;
     const modal = this._openModal("Child-care sick leave", fields, "Save settings", async (form) => {
       const link = String(form.get("care_income_link") || "").split("::");
@@ -1859,7 +1876,7 @@ class BudgetManagerPanel extends HTMLElement {
           actual_previous_year_income: selectedBasis === "actual_previous_year_income" ? actualIncome : 0,
         } },
       });
-    }, `<button type="button" class="danger-button" id="delete-care-item">Delete care leave</button>`);
+    }, `<button type="button" class="family-action destructive" id="delete-care-item">Delete care leave</button>`);
 
     const basisSelect = modal.root.querySelector("#care-editor-basis");
     const actualField = modal.root.querySelector("#care-editor-actual-field");
@@ -1889,7 +1906,7 @@ class BudgetManagerPanel extends HTMLElement {
       periodEnd.value = period?.end || period?.start || bounds.min;
       modal.root.querySelector("#care-period-form-title").textContent = period ? "Edit period" : "Add period";
       periodStart.focus();
-      requestAnimationFrame(() => periodForm.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+      requestAnimationFrame(() => periodForm.scrollIntoView({ behavior: this._scrollBehavior(), block: "nearest" }));
     };
     modal.root.querySelector("#new-care-period").onclick = () => openPeriodForm();
     modal.root.querySelector("#cancel-care-period").onclick = () => { periodForm.hidden = true; };
@@ -1935,19 +1952,33 @@ class BudgetManagerPanel extends HTMLElement {
       const revealId = this._carePeriodToReveal;
       this._carePeriodToReveal = null;
       requestAnimationFrame(() => {
-        modal.root.querySelector(`[data-period-id="${CSS.escape(revealId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        modal.root.querySelector(`[data-period-id="${CSS.escape(revealId)}"]`)?.scrollIntoView({ behavior: this._scrollBehavior(), block: "center" });
       });
     }
   }
 
-  async _toggleStatus(itemId, kind) {
+  async _toggleStatus(itemId, kind, button = null) {
     const item = this._state.months[this._month].items.find((entry) => entry.id === itemId);
     const complete = item.status === "paid" || item.status === "received";
     const status = complete ? "pending" : kind === "income" ? "received" : "paid";
+    // The checkbox stays focusable so focus and scroll survive the refresh.
+    const idle = button && !this._pendingWrite ? [...button.childNodes] : null;
+    if (idle) {
+      const indicator = document.createElement("span");
+      render(pendingIndicator(), indicator);
+      button.setAttribute("aria-busy", "true");
+      button.replaceChildren(indicator);
+    }
     try {
       await this._callWS({ type: "budget_manager/set_item_status", month: this._month, item_id: itemId, status });
       await this._load(this._year, { preserveScroll: true });
     } catch (err) { this._showError(err); }
+    finally {
+      if (idle && button.isConnected) {
+        button.setAttribute("aria-busy", "false");
+        button.replaceChildren(...idle);
+      }
+    }
   }
 
   _deleteMonth() {
@@ -1955,14 +1986,15 @@ class BudgetManagerPanel extends HTMLElement {
     const monthLabel = this._monthLabel(monthKey);
     return this._openModal(
       "Delete month?",
-      `<div class="delete-month-warning" role="alert"><strong>${this._esc(monthLabel)} will be permanently deleted.</strong><p>This removes the month and every income, expenditure, savings entry, and status stored in it. This action cannot be undone.</p></div>`,
+      this._notice({ tone: "error", title: `${this._esc(monthLabel)} will be permanently deleted.`, message: "This removes the month and every income, expenditure, savings entry, and status stored in it. This action cannot be undone.", className: "delete-month-warning" }),
       "Delete month",
       async () => {
       await this._callWS({ type: "budget_manager/delete_month", month: monthKey });
       this._month = null;
       },
       "",
-      "danger-primary",
+      "destructive",
+      { confirm: true, pendingLabel: "Deleting…" },
     );
   }
 
@@ -1978,10 +2010,20 @@ class BudgetManagerPanel extends HTMLElement {
   _showToast(message, success) {
     const toast = this.shadowRoot.getElementById("toast");
     if (!toast) return;
-    toast.textContent = message;
-    toast.classList.toggle("success", success);
+    clearTimeout(this._toastTimer);
+    const dismiss = () => toast.classList.remove("show");
+    render(notice({
+      tone: success ? "success" : "error", message,
+      action: success ? undefined : { label: "Refresh", icon: "mdi:refresh", onClick: () => { dismiss(); this._load(this._year, { preserveScroll: true }); } },
+      actions: success ? [] : [{ label: "Dismiss", emphasis: "quiet", onClick: dismiss }],
+    }), toast);
     toast.classList.add("show");
-    setTimeout(() => toast.classList.remove("show"), 5000);
+    if (success) this._toastTimer = setTimeout(dismiss, 5000);
+  }
+
+  // String-template twin of the shared togglePill(): aria-pressed plus a visible check.
+  _togglePill(label, pressed, action) {
+    return `<button type="button" class="family-action family-toggle" data-action="${action}" aria-pressed="${pressed}"><span>${label}</span><ha-icon class="family-toggle-check" icon="${UI_ICONS.check}" aria-hidden="true"></ha-icon></button>`;
   }
 
   _styles() { return [DESIGN_TOKENS_CSS, familyStyles.cssText, dialogStyles.cssText, componentStyles.cssText, metricStyles.cssText, glowStyles.cssText, panelStyles].join("\n"); }

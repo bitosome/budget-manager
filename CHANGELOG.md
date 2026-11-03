@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.16.0 — 2026-11-03
+
+- Adopt shared UI 1.4.0. Buttons, notices, chips and selected pills now use the shared family styles, so the panel no longer mixes three destructive button looks or differently tinted warnings. Past months and Edit values in the plan table are now pressed toggles with a check mark instead of labels that switch text.
+- Show what each daily-allowance colour means: plan-table cells and the per-day tile now read On track, Tight or Over. Tight uses the shared amber caution colour.
+- Show saving progress on the button that started it, with one pending message instead of two. Paid/received checkboxes show a spinner while their change is saved and keep keyboard focus.
+- Put single delete and reset confirmations in an equal two-button footer with Cancel focused first. Delete month uses the same layout.
+- Keep error messages on screen until dismissed, with a Refresh action, instead of a red toast that disappears after five seconds. Loading failures offer Try again.
+- Format money with the Home Assistant profile language, matching dates.
+- Use the shared 44px icon buttons for Refresh, year arrows, edit and drag handles, with the accent focus ring. Plan month headers are 44px tall, input focus uses the accent colour and hover lifts no longer stick on touch screens. Reduced-motion users get instant scrolling in the care-leave editor.
+
+Budget calculations, thresholds, records and backend actions are unchanged.
+
 ## 0.15.3
 
 - Keep status glows behind the full month view, including the adjacent income and expense panels, while preserving the halo between tiles.

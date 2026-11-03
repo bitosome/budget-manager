@@ -23,6 +23,10 @@ assert.equal(
 assert.match(panel._formatDateTime("2026-01-01T22:30:00Z"), /2\.1\.2026/);
 assert.match(panel._formatClockTime("09:30"), /^0?9:30$/);
 assert.match(panel._monthLabel("2026-08"), /august 2026/i);
+// Money follows the HA profile language, like dates, not the stored locale.
+panel._state = { settings: { currency: "EUR", locale: "en-GB" } };
+assert.match(panel._money(1234.5), /^1\s?234,50\s€$/);
+panel._state = null;
 
 panel._hass.locale = {
   language: "en",
@@ -108,13 +112,15 @@ assert.match(matrix, /data-action="drag-plan-row"/);
 assert.match(matrix, /data-action="edit-plan-name"/);
 assert.match(matrix, /data-original-name="Zulu"/);
 assert.match(matrix, /aria-label="Reorder Zulu"/);
-assert.match(matrix, /mdi:drag-horizontal-variant/);
+assert.match(matrix, /class="family-icon-button plan-drag-handle"[^>]*><ha-icon icon="mdi:drag" aria-hidden="true">/);
 assert.match(matrix, /data-action="open-plan-month" data-month="2026-09"/);
 assert.match(matrix, />September<\/button>/);
 assert.match(matrix, /class="matrix-group-heading"/);
 assert.doesNotMatch(matrix, /Open savings|Forecast remaining|Target funding gap/);
 assert.doesNotMatch(matrix, /data-action="open-month"/);
 const planView = panel._renderYear();
+assert.match(planView, /class="family-action family-toggle" data-action="toggle-matrix-edit" aria-pressed="true"><span>Edit values<\/span><ha-icon class="family-toggle-check"/);
+assert.match(planView, /data-action="toggle-past-months" aria-pressed="true"><span>Past months/);
 assert.doesNotMatch(planView, /class="month-(card|grid)"|class="year-toolbar"/);
 assert.match(planView, /class="matrix-wrap">\s*<div class="plan-table-controls">/);
 for (const action of ["prev-year", "next-year", "choose-year", "create-month", "create-year", "toggle-past-months", "toggle-matrix-edit"]) {
@@ -140,6 +146,7 @@ panel._state.months["2026-09"].summary = {
   days_divisor: 30, rag: "yellow", incomplete: false,
 };
 const smartMatrix = panel._renderYearMatrix();
+assert.match(smartMatrix, /class="rag-cell yellow">[^<]+<small>Tight<\/small>/);
 assert.match(smartMatrix, /Target funding gap/);
 assert.doesNotMatch(smartMatrix, /Open savings|Forecast remaining/);
 const smartMonth = panel._renderMonth({
@@ -149,6 +156,12 @@ const smartMonth = panel._renderMonth({
 assert.match(smartMonth, />Savings</);
 assert.match(smartMonth, />Remaining</);
 assert.match(smartMonth, /Target funding gap/);
+assert.match(smartMonth, /class="family-chip rag-chip" data-tone="caution">Tight</);
+assert.doesNotMatch(smartMonth, /Electricity needs data/);
+assert.match(panel._renderMonth({
+  month: "2026-09", account_balance: 0, items: [],
+  summary: { ...panel._state.months["2026-09"].summary, incomplete: true },
+}), /class="family-notice care-notice family-tile-face" data-tone="warning" role="status"><ha-icon class="family-notice-icon" icon="mdi:alert-outline"/);
 assert.doesNotMatch(smartMonth, /Forecast remaining|Open savings/);
 panel._state.settings.automatic_savings_enabled = false;
 
@@ -286,15 +299,17 @@ await billSubmit(new Map([["total","234.56"],["kwh","1000.5"],["fixed_fees","26.
 assert.deepEqual(billRequest, {type:"budget_manager/electricity",action:"bill",document:{payment_month:"2026-09",item_id:"electric",total:234.56,kwh:1000.5,fixed_fees:26.96,enabled:true}});
 
 let deleteMonthDialog, deleteMonthSubmit;
-panel._openModal = (title, fields, submitLabel, callback, extraButtons, submitClass) => {
-  deleteMonthDialog = {title, fields, submitLabel, extraButtons, submitClass};
+panel._openModal = (title, fields, submitLabel, callback, extraButtons, submitClass, options) => {
+  deleteMonthDialog = {title, fields, submitLabel, extraButtons, submitClass, options};
   deleteMonthSubmit = callback;
 };
 panel._month = "2026-09";
 panel._deleteMonth();
 assert.equal(deleteMonthDialog.title, "Delete month?");
 assert.equal(deleteMonthDialog.submitLabel, "Delete month");
-assert.equal(deleteMonthDialog.submitClass, "danger-primary");
+assert.equal(deleteMonthDialog.submitClass, "destructive");
+assert.equal(deleteMonthDialog.options.confirm, true);
+assert.match(deleteMonthDialog.fields, /class="family-notice delete-month-warning" data-tone="error" role="alert"/);
 assert.match(deleteMonthDialog.fields, /September 2026 will be permanently deleted/);
 let deleteMonthRequest;
 panel._hass.callWS = async request => { deleteMonthRequest = request; };
