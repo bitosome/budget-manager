@@ -686,7 +686,7 @@ class BudgetManagerPanel extends HTMLElement {
           ${item.category ? ` · ${this._esc(item.category)}` : ""}
           ${item.assignee_user_id ? ` · assigned to ${this._esc(this._assigneeName(item.assignee_user_id))} · reminders from ${this._esc(this._formatClockTime(item.reminder_time || "09:00"))}` : ""}
           · ${this._recurrenceLabel(item)}
-          ${electric ? ` · <strong>${electric.status === "actual" ? "Billed electricity" : electric.status === "measured" ? "Measured electricity" : electric.status === "missing" ? "Electricity needs data" : "Estimated electricity"}</strong> · ${this._monthLabel(electric.consumption_month)} consumption${electric.status !== "missing" ? ` · accumulated ${this._money(electric.grid_cost)} · fixed fees ${this._money(electric.fixed_fees)} · buffer ${this._money(electric.buffer)}` : ""}${electric.warning ? ` · ${this._esc(electric.warning)}` : ""}` : ""}
+          ${electric ? ` · <strong>${electric.status === "actual" ? "Billed electricity" : electric.status === "measured" ? "Measured electricity" : electric.status === "missing" ? "Electricity needs data" : "Estimated electricity"}</strong> · ${this._monthLabel(electric.consumption_month)} consumption${electric.status !== "missing" ? ` · accumulated ${this._money(electric.grid_cost)}${electric.calibration && electric.calibration !== 1 ? ` (meter ×${this._calibrationFactor(electric.calibration)})` : ""} · fixed fees ${this._money(electric.fixed_fees)} · buffer ${this._money(electric.buffer)}` : ""}${electric.warning ? ` · ${this._esc(electric.warning)}` : ""}` : ""}
           ${item.income_calculation ? ` · Estonian hourly ${this._money(item.income_calculation.hourly_gross)}/h × ${this._esc(item.income_calculation.working_hours)} h · ${this._monthLabel(item.income_calculation.working_time_month || this._incomeWorkingMonth(this._month, item.income_calculation.work_period))} work period` : ""}
           ${Number(item.income_calculation?.care_leave_hours || 0) > 0 ? ` · ${this._esc(item.income_calculation.care_leave_hours)} care-leave hours deducted · approx. net reduction ${this._money(item.income_calculation.care_leave_net_salary_reduction || 0)}` : ""}
           ${generatedPeriod ? ` · Tervisekassa approximation for ${this._esc(generatedPeriod)}` : ""}
@@ -1109,6 +1109,17 @@ class BudgetManagerPanel extends HTMLElement {
     });
   }
 
+  _calibrationFactor(value) {
+    return Number(value).toLocaleString(this._localeLanguage(), {minimumFractionDigits:3, maximumFractionDigits:4});
+  }
+
+  _calibrationStatus(calibration = {}) {
+    if (calibration.status === "disabled") return "Meter calibration: off. Measured kWh and cost are used as recorded.";
+    if (calibration.status !== "applied") return "Meter calibration: waiting for a bill month that also has complete measured data.";
+    const months = (calibration.months || []).map(m => `${this._monthLabel(m.month)} ×${this._calibrationFactor(m.ratio)}`).join(", ");
+    return `Meter calibration: measured kWh and cost ×${this._calibrationFactor(calibration.factor)} (median of ${months}). Billed kWh ÷ measured kWh; the price source is unchanged.`;
+  }
+
   _electricityStatusHtml(state = {}) {
     const model = state.model || {}, training = state.training || {}, refresh = state.refresh || {};
     const billMonths = Object.keys(state.history || {}).length;
@@ -1120,6 +1131,7 @@ class BudgetManagerPanel extends HTMLElement {
       <p class="form-help">${billMonths} confirmed history months · ${measuredMonths} additional measured months. Only enabled, positive-consumption months inside the history window train the model. Confirmed history takes priority over measurements.</p>
       <p class="form-help">Fitted method: ${!model.samples ? "not trained" : model.method === "adaptive" ? model.samples >= 6 ? "adaptive seasonal regression" : "recent weighted average (seasonal fitting requires at least 6 months)" : "recent weighted average"}. Automatic learning: ${this._state.settings.electricity?.learning_enabled === false ? "paused" : "on"}.</p>
       <p class="form-help">Last training attempt: ${date(training.finished_at)}${duration(training.duration_ms)}. This small local model can finish training in milliseconds.</p>
+      <p class="form-help">${this._calibrationStatus(state.calibration)}</p>
       <p class="form-help">Walk-forward error (before buffer): ${state.diagnostics?.mae_eur != null ? `${this._money(state.diagnostics.mae_eur)} mean absolute error across ${state.diagnostics.evaluated_months} months` : "not enough earlier months to evaluate"}. Historical performance does not guarantee future prices.</p>
       <p class="form-help">Last statistics refresh: ${date(refresh.finished_at)}${duration(refresh.duration_ms)}${refresh.message ? ` · ${this._esc(refresh.message)}` : ""}</p>
       ${state.warning && state.warning !== refresh.message ? `<p class="form-help">${this._esc(state.warning)}</p>` : ""}`;
@@ -1165,14 +1177,18 @@ class BudgetManagerPanel extends HTMLElement {
       <label><span>Estimation method</span><select name="method"><option value="adaptive" ${config.method !== "recent_average" ? "selected" : ""}>Adaptive seasonal regression</option><option value="recent_average" ${config.method === "recent_average" ? "selected" : ""}>Recent weighted average</option></select></label>
       <label class="check"><input type="checkbox" name="learning_enabled" ${config.learning_enabled !== false ? "checked" : ""}><span>Learn automatically from completed months</span></label>
       <p class="form-help">Pausing learning freezes the fitted model; measured costs continue updating. The model runs locally without a cloud AI service. Price adaptation uses recent consumption-weighted costs, not one volatile hourly price.</p>
+      <label class="check"><input type="checkbox" name="meter_calibration" ${config.meter_calibration !== false ? "checked" : ""}><span>Calibrate measured consumption to billed kWh</span></label>
+      <p class="form-help">Compares each bill's kWh with the measured kWh for the same month and scales measured kWh and cost by the median ratio of the latest bill months. Use it when your home meter reads a steady few percent away from the utility meter.</p>
+      <div class="two-col">${this._field("Calibration window, bill months", "calibration_months", config.calibration_months ?? 3, "number", "min=1 max=12 step=1 required")}</div>
       <div class="two-col">${this._field("Buffer on unmeasured costs, %", "buffer_percent", config.buffer_percent ?? 15, "number", "min=0 max=200 step=1 required")}${this._field("Recent-price weight, %", "live_price_weight", config.live_price_weight ?? 50, "number", "min=0 max=100 step=1 required")}${this._field("History window, months", "history_months", config.history_months ?? 36, "number", "min=3 max=60 step=1 required")}${this._field("Learning half-life, months", "half_life_months", config.half_life_months ?? 6, "number", "min=1 max=36 step=1 required")}</div>
       <p class="form-help">Fallback values are used before sufficient data is available. Leave both at zero to show Needs data instead of inventing an estimate.</p><div class="two-col">${this._field("Fallback monthly consumption, kWh", "fallback_monthly_kwh", config.fallback_monthly_kwh ?? 0, "number", "min=0 max=100000 step=0.01 required")}${this._field("Fallback variable price, EUR/kWh", "fallback_price", config.fallback_price ?? 0, "number", "min=0 max=10 step=0.00001 required")}</div></fieldset>
       <fieldset class="settings-group"><legend>Model status</legend><div id="electricity-model-status">${this._electricityStatusHtml(state)}</div><div class="data-actions"><button type="button" class="family-action" id="electricity-history" aria-haspopup="dialog"><ha-icon icon="${UI_ICONS.history}" aria-hidden="true"></ha-icon>Review / import history</button><button type="button" class="family-action" data-electricity-action="refresh">Refresh statistics</button><button type="button" class="family-action" data-electricity-action="retrain">Retrain now</button><button type="button" class="family-action destructive" data-electricity-action="reset">Reset model</button></div><p id="electricity-action-status" role="status" aria-live="polite"></p><p class="form-help">These controls use saved settings. Save changes before training or refreshing. Reset pauses learning and keeps history; retrain restores the model from that history.</p></fieldset>`;
     const modal = this._openModal("Electricity settings", fields, "Save settings", async form => {
       const electricity = {...config};
       for (const key of ["cost_statistic_id", "energy_statistic_id", "price_entity_id", "method"]) electricity[key] = String(form.get(key) || "").trim();
-      for (const key of ["buffer_percent", "live_price_weight", "history_months", "half_life_months", "fallback_monthly_kwh", "fallback_price"]) electricity[key] = Number(form.get(key));
+      for (const key of ["buffer_percent", "live_price_weight", "history_months", "half_life_months", "fallback_monthly_kwh", "fallback_price", "calibration_months"]) electricity[key] = Number(form.get(key));
       electricity.learning_enabled = form.has("learning_enabled");
+      electricity.meter_calibration = form.has("meter_calibration");
       electricity.fees = [...modal.root.querySelectorAll(".electricity-fee")].map(row => {
         const bound = name => { const input = row.querySelector(`[name="${name}"]`); return row.querySelector(`[data-fee-bound="${name}"]`).value === "unlimited" ? null : input.value || null; };
         return {name:row.querySelector('[name="fee-name"]').value,amount:Number(row.querySelector('[name="fee-amount"]').value),from_month:bound("fee-from"),to_month:bound("fee-to")};

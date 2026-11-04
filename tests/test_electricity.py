@@ -104,6 +104,58 @@ class ElectricityTests(unittest.TestCase):
             self.assertNotIn("2026-03",observations)
 
 
+    def _calibration_state(self):
+        bills = [{"month": m, "kwh": k, "grid_cost": 200, "fixed_fees": 27} for m, k in
+            (("2026-03", 1011), ("2026-06", 1011), ("2026-07", 1020), ("2026-08", 1024), ("2026-09", 1024))]
+        measured = [{"month": m, "kwh": 1000, "grid_cost": 195, "fixed_fees": 15, "source": "recorder"} for m in
+            ("2026-03", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10")]
+        return {"history": electricity.normalize_history(bills), "observations": electricity.normalize_history(measured),
+            "ignored_months": []}
+
+    def test_meter_calibration_is_median_of_latest_bill_months(self):
+        state = self._calibration_state()
+        cal = electricity.meter_calibration(state, self.settings)
+        self.assertEqual(cal["status"], "applied")
+        self.assertEqual([m["month"] for m in cal["months"]], ["2026-07", "2026-08", "2026-09"])
+        self.assertEqual(cal["factor"], 1.024)
+        two = electricity.meter_calibration(state, {**self.settings, "calibration_months": 2})
+        self.assertEqual(two["factor"], 1.024)
+        four = electricity.meter_calibration(state, {**self.settings, "calibration_months": 4})
+        self.assertEqual(four["factor"], 1.022)  # even count: mean of the middle two
+
+    def test_meter_calibration_skips_unusable_months_and_can_be_disabled(self):
+        state = self._calibration_state()
+        state["history"]["2026-09"]["kwh"] = 2000          # ratio 2.0: a wrong bill, not a meter offset
+        state["history"]["2026-08"]["source"] = "recorder"  # an exported Recorder month is not a bill
+        state["history"]["2026-07"]["enabled"] = False
+        state["ignored_months"] = ["2026-06"]
+        cal = electricity.meter_calibration(state, self.settings)
+        self.assertEqual([m["month"] for m in cal["months"]], ["2026-03"])
+        self.assertEqual(cal["factor"], 1.011)
+        self.assertEqual(electricity.meter_calibration({"history": {}, "observations": {}}, self.settings),
+            {"status": "no_data", "factor": 1.0, "months": []})
+        off = electricity.normalize_settings({"meter_calibration": False})
+        self.assertEqual(electricity.meter_calibration(state, off)["status"], "disabled")
+        for raw in ({"meter_calibration": "yes"}, {"calibration_months": 0}, {"calibration_months": 1.5}):
+            with self.assertRaises(ValueError): electricity.normalize_settings(raw)
+
+    def test_calibration_scales_recorder_months_and_live_accrual_only(self):
+        state = self._calibration_state()
+        history = electricity.combined_history(state, 1.024)
+        self.assertEqual(history["2026-10"]["kwh"], 1024)
+        self.assertEqual(history["2026-10"]["grid_cost"], 199.68)
+        self.assertEqual(history["2026-09"]["grid_cost"], 200)  # bills are used as billed
+        measured = electricity.forecast("2026-11", self.settings, history, {}, {}, date(2026, 11, 4))
+        self.assertEqual((measured["status"], measured["amount"], measured["calibration"]), ("measured", 214.68, 1.024))
+        live = {"month": "2026-09", "grid_cost": 100, "kwh": 500, "elapsed_days": 15, "month_coverage": 1}
+        plain = electricity.forecast("2026-10", self.settings, {}, {}, live, self.today)
+        scaled = electricity.forecast("2026-10", self.settings, {}, {}, live, self.today, 1.024)
+        self.assertEqual(plain["grid_cost"], 100)
+        self.assertEqual(scaled["grid_cost"], 102.4)
+        self.assertEqual(scaled["calibration"], 1.024)
+        self.assertGreater(scaled["amount"], plain["amount"])
+
+
 class RecorderReaderTests(unittest.IsolatedAsyncioTestCase):
     async def test_reader_uses_stored_units_and_supports_legacy_metadata(self):
         tz = ZoneInfo("Europe/Tallinn")
@@ -302,5 +354,23 @@ class ElectricityManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(warning["refresh"]["status"], "warning")
         self.assertIn("No complete paired hours", warning["refresh"]["message"])
 
+
+    async def test_bill_entry_calibrates_measured_months_and_keeps_raw_observations(self):
+        await self.manager.async_upsert_item("2026-09", {"name":"Electricity", "expense_type":"electricity", "amount":0})
+        state = self.manager.data["electricity"]
+        state["observations"] = electricity.normalize_history([
+            {"month":"2026-07", "kwh":1000, "grid_cost":150, "source":"recorder"},
+            {"month":"2026-08", "kwh":1000, "grid_cost":200, "source":"recorder"}])
+        state["history"] = electricity.normalize_history([{"month":"2026-07", "kwh":1025, "grid_cost":155}])
+        await self.manager._async_commit()
+        item = self.manager.data["months"]["2026-09"]["items"][0]
+        self.assertEqual(state["calibration"]["factor"], 1.025)
+        self.assertEqual(item["electricity"]["status"], "measured")
+        self.assertEqual(item["electricity"]["grid_cost"], 205)
+        self.assertEqual(item["electricity"]["calibration"], 1.025)
+        self.assertEqual(state["observations"]["2026-08"]["grid_cost"], 200)  # stored raw
+        await self.manager.async_update_settings({"electricity": {**self.manager.data["settings"]["electricity"], "meter_calibration": False}})
+        self.assertEqual(state["calibration"]["status"], "disabled")
+        self.assertEqual(item["electricity"]["grid_cost"], 200)
 
 if __name__ == "__main__": unittest.main()

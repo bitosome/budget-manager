@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.0 — 2026-11-04
+
+- Calibrate measured electricity to billed kWh. A home meter such as a CT-clamp energy monitor can read a steady few percent away from the utility meter. For each confirmed bill month that also has a complete measured month, Budget Manager now compares billed kWh with measured kWh. It scales measured kWh and cost by the median ratio of the latest bill months (three by default). This applies to measured months, the current month's running total and model training. Bills are always used as billed, and the price still comes from your cost statistic.
+- Electricity settings gain **Calibrate measured consumption to billed kWh** (on by default) and **Calibration window, bill months** (1–12). Model status shows the factor and the months behind it, and a calibrated month's breakdown shows the meter factor next to the accumulated cost.
+- Ratios outside 0.8–1.25 count as data errors and are ignored. Recorder months are still stored unscaled, so turning calibration off restores the recorded figures.
+
 ## 0.16.2 — 2026-11-03
 
 - Refresh date-dependent sensors at midnight on the Home Assistant event loop. The day-change listener was a plain function, so Home Assistant ran it in a worker thread and logged "calls async_write_ha_state from a thread other than the event loop" at each day change. Entity update listeners are now marked as event-loop callbacks.

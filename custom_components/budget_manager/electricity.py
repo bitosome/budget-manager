@@ -51,15 +51,22 @@ def normalize_settings(raw=None):
     result["learning_enabled"] = raw.get("learning_enabled", True)
     if not isinstance(result["learning_enabled"], bool):
         raise ValueError("Learning enabled must be true or false")
+    result["meter_calibration"] = raw.get("meter_calibration", True)
+    if not isinstance(result["meter_calibration"], bool):
+        raise ValueError("Meter calibration must be true or false")
     for key, default, low, high in (
         ("buffer_percent", 15, 0, 200), ("history_months", 36, 3, 60),
         ("half_life_months", 6, 1, 36), ("live_price_weight", 50, 0, 100),
         ("fallback_monthly_kwh", 0, 0, 100000), ("fallback_price", 0, 0, 10),
+        ("calibration_months", 3, 1, 12),
     ):
         result[key] = number(raw.get(key, default), key, low, high)
     if result["history_months"] != int(result["history_months"]):
         raise ValueError("History window must be whole months")
     result["history_months"] = int(result["history_months"])
+    if result["calibration_months"] != int(result["calibration_months"]):
+        raise ValueError("Calibration window must be whole months")
+    result["calibration_months"] = int(result["calibration_months"])
     fees = raw.get("fees", [])
     if not isinstance(fees, list) or len(fees) > 50:
         raise ValueError("Provide at most 50 fixed monthly fees")
@@ -170,8 +177,12 @@ def predict_usage(model, month, settings):
     return daily * _days(month)
 
 
-def forecast(payment_month, settings, history, model, live, today):
-    """Previous consumption month, observed cost + buffered unobserved cost + fees."""
+def forecast(payment_month, settings, history, model, live, today, calibration=1.0):
+    """Previous consumption month, observed cost + buffered unobserved cost + fees.
+
+    ``calibration`` is the bill/meter kWh factor from ``meter_calibration``. It
+    scales this month's Recorder kWh and cost; the price source is unchanged.
+    """
     consumption = shift_month(payment_month, -1)
     current = today.strftime("%Y-%m")
     row = history.get(consumption)
@@ -180,6 +191,7 @@ def forecast(payment_month, settings, history, model, live, today):
         total = row["grid_cost"] + row["fixed_fees"]
         return {"amount": round(max(0, total), 2), "status": "measured" if row["source"] == "recorder" else "actual", "consumption_month": consumption,
             "grid_cost": row["grid_cost"], "fixed_fees": row["fixed_fees"], "buffer": 0,
+            "calibration": row.get("calibration", 1.0),
             "source": row["source"], "kwh": row["kwh"], "warning": "Net electricity credit; budget expense is zero" if total < 0 else ""}
     usage = predict_usage(model, consumption, settings)
     price = predict_price(model, consumption, settings)
@@ -190,7 +202,7 @@ def forecast(payment_month, settings, history, model, live, today):
         price = price * (1 - blend) + recent_price * blend if model.get("samples") else recent_price
     observed = 0.0; observed_kwh = 0.0; fraction = 0.0
     if consumption == current and live.get("month") == current and live.get("month_coverage", 0) >= .95:
-        observed = live.get("grid_cost", 0); observed_kwh = live.get("kwh", 0)
+        observed = live.get("grid_cost", 0) * calibration; observed_kwh = live.get("kwh", 0) * calibration
         fraction = min(1, live.get("elapsed_days", 0) / _days(current))
         if fraction >= 3 / _days(current) and observed_kwh > 0:
             # Gradually adapt expected consumption to this month's actual run rate.
@@ -206,6 +218,7 @@ def forecast(payment_month, settings, history, model, live, today):
         "grid_cost": round(observed, 2), "projected_grid_cost": round(observed + remainder, 2),
         "fixed_fees": fees, "buffer": round(buffer, 2), "kwh": round(usage, 2),
         "unit_price": round(price, 5), "samples": model.get("samples", 0),
+        "calibration": round(calibration, 5) if fraction else 1.0,
         "warning": "Historical month has no complete measured data" if consumption < current else
             "Limited training history" if model.get("samples", 0) < 6 else ""}
 
@@ -233,10 +246,51 @@ def empty_state():
     return {"history": {}, "observations": {}, "ignored_months": [], "model": {}, "live": {}, "diagnostics": {}}
 
 
-def combined_history(state):
-    # Manually confirmed/imported bills take priority over Recorder observations.
+CALIBRATION_BOUNDS = (0.8, 1.25)
+
+
+def meter_calibration(state, settings):
+    """Bill/meter kWh factor from the latest months that have both a bill and Recorder data.
+
+    A home meter (for example a CT clamp) can read a steady few percent away from
+    the utility meter. Each confirmed bill month that also has a complete Recorder
+    month gives a ratio; the median of the most recent ``calibration_months``
+    ratios is the factor. Ratios outside CALIBRATION_BOUNDS are treated as data
+    errors (a wrong bill or a broken month) and ignored. Raw observations stay
+    unscaled in storage, so the factor can always be recomputed.
+    """
+    if not settings.get("meter_calibration", True):
+        return {"status": "disabled", "factor": 1.0, "months": []}
     ignored = set(state.get("ignored_months", []))
-    return {**{key: row for key, row in state.get("observations", {}).items() if key not in ignored},
+    ratios = []
+    for key, bill in sorted(state.get("history", {}).items()):
+        measured = state.get("observations", {}).get(key)
+        if (not measured or key in ignored or bill.get("source") == "recorder"
+                or not bill.get("enabled", True) or bill["kwh"] <= 0 or measured["kwh"] <= 0):
+            continue
+        ratio = bill["kwh"] / measured["kwh"]
+        if CALIBRATION_BOUNDS[0] <= ratio <= CALIBRATION_BOUNDS[1]:
+            ratios.append((key, ratio))
+    recent = ratios[-settings.get("calibration_months", 3):]
+    if not recent:
+        return {"status": "no_data", "factor": 1.0, "months": []}
+    values = sorted(ratio for _, ratio in recent)
+    middle = len(values) // 2
+    factor = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+    return {"status": "applied", "factor": round(factor, 5),
+        "months": [{"month": key, "ratio": round(ratio, 5)} for key, ratio in recent]}
+
+
+def combined_history(state, calibration=1.0):
+    # Manually confirmed/imported bills take priority over Recorder observations.
+    # Recorder months are scaled by the bill/meter factor; bills are used as billed.
+    ignored = set(state.get("ignored_months", []))
+    def scaled(row):
+        if calibration == 1.0:
+            return row
+        return {**row, "kwh": row["kwh"] * calibration,
+            "grid_cost": round(row["grid_cost"] * calibration, 2), "calibration": calibration}
+    return {**{key: scaled(row) for key, row in state.get("observations", {}).items() if key not in ignored},
         **state.get("history", {})}
 
 

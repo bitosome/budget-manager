@@ -45,6 +45,11 @@ check(current()===parent2,'Saving child returns to parent');
 check(parent2.form.querySelector('[name=cycle_end_day]').value==='9','Child save preserves parent draft');
 const fees=p.calls.find(msg=>msg.type==='budget_manager/update_settings')?.changes.electricity.fees;
 assert.deepEqual(fees,[{name:'Grid fee',amount:5,from_month:'2026-01',to_month:'2026-12'}]);count++;
+const savedElectricity=p.calls.find(msg=>msg.type==='budget_manager/update_settings')?.changes.electricity;
+check(savedElectricity.meter_calibration===true&&savedElectricity.calibration_months===3,'Meter calibration defaults on with a three-bill window');
+check(p._calibrationStatus({status:'applied',factor:1.02409,months:[{month:'2026-09',ratio:1.02409}]}).includes('×1.024'),'Calibration status names the factor');
+check(p._calibrationStatus({status:'no_data'}).includes('waiting for a bill month'),'Calibration status explains missing data');
+check(p._calibrationStatus({status:'disabled'}).includes('off'),'Calibration status reports off');
 d.flow.forceClose();
 // Slow saves are isolated from duplicate input and subsequently opened flows.
 const slow=deferred();p._hass.callWS=async msg=>{p.calls.push(structuredClone(msg));return slow.promise;};

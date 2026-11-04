@@ -473,7 +473,8 @@ class BudgetManager:
     def _train_electricity(self, *, force=False, trigger="automatic"):
         state = self._data.setdefault("electricity", electricity.empty_state())
         settings = self._data["settings"].setdefault("electricity", electricity.normalize_settings())
-        history = electricity.combined_history(state)
+        state["calibration"] = electricity.meter_calibration(state, settings)
+        history = electricity.combined_history(state, state["calibration"]["factor"])
         current = self.today().strftime("%Y-%m")
         inputs = {"history": history, "month": current,
             **{key: settings[key] for key in ("method", "history_months", "half_life_months")}}
@@ -496,12 +497,13 @@ class BudgetManager:
         self._train_electricity()
         state = self._data["electricity"]
         settings = self._data["settings"]["electricity"]
-        history = electricity.combined_history(state)
+        factor = state["calibration"]["factor"]
+        history = electricity.combined_history(state, factor)
         for key, month in self._data["months"].items():
             for item in month["items"]:
                 if item.get("expense_type") != electricity.ELECTRICITY_TYPE or item["status"] != STATUS_PENDING:
                     continue
-                details = electricity.forecast(key, settings, history, state["model"], state.get("live", {}), self.today())
+                details = electricity.forecast(key, settings, history, state["model"], state.get("live", {}), self.today(), factor)
                 item["electricity"] = details
                 item["amount"] = details["amount"]
                 item["needs_review"] = False
