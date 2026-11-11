@@ -1,3 +1,18 @@
+get_month:
+  name: Get budget month
+  description: >-
+    Return every income, expense and savings item of one budget month with its
+    amount, status and due date, plus the month totals. The summary sensors only
+    count items that are still pending, so use this action to read received
+    income and paid expenses. Call it with return_response.
+  fields:
+    month:
+      name: Month
+      description: Budget month as YYYY-MM. Leave empty for the current budget month.
+      example: "2026-09"
+      selector:
+        text:
+
 set_balance:
   name: Set account balance
   description: Manually set the account balance for a budget month.

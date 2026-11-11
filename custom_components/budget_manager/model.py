@@ -872,6 +872,85 @@ def calculate_month(
     }
 
 
+REPORT_SUMMARY_KEYS = (
+    "account_balance",
+    "total_income",
+    "expected_income",
+    "total_expenses",
+    "unpaid_expenses",
+    "total_savings",
+    "planned_savings",
+    "remaining",
+    "daily_allowance",
+    "days_divisor",
+    "rag",
+    "pending_count",
+    "paid_count",
+    "incomplete",
+)
+
+
+def month_report(
+    month: dict[str, Any],
+    *,
+    settings: dict[str, Any] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Return one month as a compact, readable list of every item.
+
+    The summary sensors only carry what is still open, so a received salary or
+    a paid loan instalment is invisible there. This lists every income,
+    expense and savings item with its amount and status, for the get_month
+    action that automations and assistants call.
+    """
+    month_key = validate_month_key(month["month"])
+    summary = calculate_month(month, settings=settings, today=today)
+    effective_amounts = summary["effective_amounts"]
+    groups: dict[str, list[dict[str, Any]]] = {
+        KIND_INCOME: [],
+        KIND_EXPENSE: [],
+        KIND_SAVINGS: [],
+    }
+    for item in month.get("items", []):
+        if not item_is_financial(item) or item.get("kind") not in groups:
+            continue
+        due_day = item.get("due_day")
+        row: dict[str, Any] = {
+            "id": item["id"],
+            "name": item["name"],
+            "amount": effective_amounts.get(
+                item["id"], money(item.get("amount", 0))
+            ),
+            "status": item.get("status", STATUS_PENDING),
+            "due_date": due_date(month_key, due_day).isoformat()
+            if due_day is not None
+            else None,
+            "recurrence": item.get("recurrence", RECURRENCE_SINGLE),
+        }
+        for key in ("category", "paid_at", "notes"):
+            if item.get(key):
+                row[key] = item[key]
+        if item.get("special"):
+            row["special_label"] = item.get("special_label") or "Renewal"
+        if (
+            item.get("expense_type") == electricity.ELECTRICITY_TYPE
+            and (item.get("electricity") or {}).get("status") == "missing"
+        ):
+            row["amount_missing"] = True
+        groups[item["kind"]].append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda row: (row["due_date"] or "", row["name"].casefold()))
+    return {
+        "month": month_key,
+        "payday": month.get("payday"),
+        "balance_updated_at": month.get("balance_updated_at"),
+        "summary": {key: summary[key] for key in REPORT_SUMMARY_KEYS},
+        "income": groups[KIND_INCOME],
+        "expenses": groups[KIND_EXPENSE],
+        "savings": groups[KIND_SAVINGS],
+    }
+
+
 def calculate_year(
     data: dict[str, Any], year: int, *, today: date | None = None
 ) -> dict[str, Any]:

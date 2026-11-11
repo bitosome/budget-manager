@@ -280,6 +280,54 @@ class BudgetModelTests(unittest.TestCase):
                 }
             )
 
+    def test_month_report_lists_settled_items_the_sensors_leave_out(self) -> None:
+        month = model.make_month("2026-09")
+        month["payday"] = "2026-09-30"
+        month["account_balance"] = 1000
+        month["items"] = [
+            model.normalize_item(
+                {"name": "Salary", "kind": "income", "amount": 3000,
+                 "due_day": 5, "status": "received", "recurrence": "monthly"}
+            ),
+            model.normalize_item(
+                {"name": "Car loan", "kind": "expense", "amount": 450.5,
+                 "due_day": 12, "status": "paid", "category": "Loans"}
+            ),
+            model.normalize_item(
+                {"name": "Internet", "kind": "expense", "amount": 30, "due_day": 3}
+            ),
+            model.normalize_item(
+                {"name": "Savings", "kind": "savings", "amount": 100,
+                 "dynamic": False}
+            ),
+        ]
+        report = model.month_report(month, today=date(2026, 9, 1))
+
+        # The sensors report open items only: a received salary reads as zero.
+        self.assertEqual(report["summary"]["expected_income"], 0)
+        self.assertEqual(report["summary"]["total_income"], 3000)
+        self.assertEqual(report["summary"]["total_expenses"], 480.5)
+        self.assertEqual(report["summary"]["unpaid_expenses"], 30)
+        self.assertNotIn("effective_amounts", report["summary"])
+
+        self.assertEqual(
+            [(row["name"], row["amount"], row["status"], row["due_date"])
+             for row in report["income"]],
+            [("Salary", 3000, "received", "2026-09-05")],
+        )
+        self.assertEqual(report["income"][0]["recurrence"], "monthly")
+        self.assertEqual(
+            [(row["name"], row["amount"], row["status"]) for row in report["expenses"]],
+            [("Internet", 30, "pending"), ("Car loan", 450.5, "paid")],
+        )
+        self.assertEqual(report["expenses"][1]["category"], "Loans")
+        self.assertNotIn("category", report["expenses"][0])
+        self.assertEqual(report["savings"][0]["amount"], 100)
+        self.assertEqual(
+            {row["id"] for row in report["expenses"]},
+            {item["id"] for item in month["items"] if item["kind"] == "expense"},
+        )
+
     def test_dynamic_savings_preserves_plan_inside_rag_band(self) -> None:
         month = model.make_month("2026-09")
         month["payday"] = "2026-09-30"

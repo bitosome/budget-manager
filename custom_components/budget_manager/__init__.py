@@ -7,13 +7,18 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN, NAME, PLATFORMS
 from .manager import BudgetManager
 from .electricity_source import ElectricityCoordinator
-from .model import BudgetValidationError
+from .model import BudgetValidationError, month_report, validate_month_key
 from .notifications import BudgetReminderCoordinator
 from .panel import async_register_panel, async_unregister_panel
 from .websocket_api import async_register_websocket_api
@@ -70,6 +75,43 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         except BudgetValidationError as err:
             raise HomeAssistantError(str(err)) from err
 
+    async def handle_get_month(call: ServiceCall) -> ServiceResponse:
+        """Return every income, expense and savings item of one month."""
+        manager = get_manager(hass)
+        months = manager.data["months"]
+        current = manager.current_month()
+        current_key = current["month"] if current else None
+        try:
+            month_key = (
+                validate_month_key(call.data["month"])
+                if call.data.get("month")
+                else current_key
+            )
+        except BudgetValidationError as err:
+            raise HomeAssistantError(str(err)) from err
+        if month_key is None or month_key not in months:
+            raise HomeAssistantError(
+                f"Budget month {month_key} does not exist. "
+                f"Available months: {', '.join(sorted(months)) or 'none'}"
+            )
+        return {
+            "currency": manager.data["settings"].get("currency", "EUR"),
+            "current_month": current_key,
+            "available_months": sorted(months),
+            **month_report(
+                months[month_key],
+                settings=manager.data.get("settings"),
+                today=manager.today(),
+            ),
+        }
+
+    hass.services.async_register(
+        DOMAIN,
+        "get_month",
+        handle_get_month,
+        schema=vol.Schema({vol.Optional("month"): str}),
+        supports_response=SupportsResponse.ONLY,
+    )
     hass.services.async_register(
         DOMAIN,
         "set_balance",

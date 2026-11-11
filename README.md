@@ -273,6 +273,21 @@ Invoice history is private household data. No personal invoices, pretrained hous
 
 Entity IDs may receive a numeric suffix when an entity with the same ID already exists.
 
+The sensors are totals for the current budget month. `expected_income` and `unpaid_expenses` count pending items only, so they drop to zero once a salary is received or a bill is paid. Their attributes also carry `total_income`, `total_expenses`, `total_savings`, `pending_count` and `paid_count` for the whole month.
+
+### Reading individual items
+
+The `budget_manager.get_month` action returns every income, expense and savings item of one month, with its amount, status, due date, recurrence, category and notes, plus the month totals and the list of available months. Use it from automations, scripts and assistants (for example an LLM connected through an MCP server), which cannot read the panel. The calendar is not a complete list: it has no event for an item without a due day:
+
+```yaml
+action: budget_manager.get_month
+data:
+  month: "2026-11"   # optional; the current budget month when left out
+response_variable: budget
+```
+
+Each item's `id` is the `item_id` that `budget_manager.mark_item` takes.
+
 ### Assigned reminders
 
 The optional **Assignee** field lists active Home Assistant users that currently have at least one enabled Mobile App notification entity. Selecting an assignee requires a due day and enables a first-reminder time, which defaults to 09:00. Calendar occurrences remain all-day events; the reminder time is independent calendar-notification metadata interpreted in Home Assistant's configured timezone. Budget Manager sends a Companion App push at that time and hourly afterward through the end of the due day, stopping as soon as the item is marked paid or received. If a user has multiple registered notification devices, all of them receive the reminder.

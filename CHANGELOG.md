@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.0 — 2026-11-11
+
+- Add the `budget_manager.get_month` action. It returns every income, expense and savings item of a month with its amount, status and due date, plus the month totals. Until now items were readable only as calendar events, which leave out every item without a due day, and the five summary sensors count pending items only. An assistant or automation therefore saw part of the month and could miss an income or a loan instalment.
+- Add `total_income`, `total_expenses`, `total_savings`, `pending_count` and `paid_count` to the summary sensors' attributes.
+
+Budget calculations and records are unchanged.
+
 ## 0.17.0 — 2026-11-04
 
 - Calibrate measured electricity to billed kWh. A home meter such as a CT-clamp energy monitor can read a steady few percent away from the utility meter. For each confirmed bill month that also has a complete measured month, Budget Manager now compares billed kWh with measured kWh. It scales measured kWh and cost by the median ratio of the latest bill months (three by default). This applies to measured months, the current month's running total and model training. Bills are always used as billed, and the price still comes from your cost statistic.
